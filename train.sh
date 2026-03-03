@@ -14,10 +14,11 @@ HOSTNAME=$(hostname)
 NODE_RANK=${NODE_RANK:-0}
 MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 MASTER_PORT=${MASTER_PORT:-29500}
-echo "${NODE_RANK}, ${MASTER_ADDR}, ${MASTER_PORT}"
+echo "NODE_RANK: ${NODE_RANK}, MASTER_ADDR: ${MASTER_ADDR}, MASTER_PORT: ${MASTER_PORT}"
 
 N_NODE=${N_NODE:-1}
 GPU_PER_NODE=${GPU_PER_NODE:-1}
+echo "N_NODE: ${N_NODE}, GPU_PER_NODE: ${GPU_PER_NODE}"
 
 torchrun \
   --nnodes=${N_NODE}:${N_NODE} \
@@ -25,4 +26,9 @@ torchrun \
   --node_rank=${NODE_RANK} \
   --master_addr=${MASTER_ADDR} \
   --master_port=${MASTER_PORT} \
-    train.py
+    train.py \
+    --project_config configs/default_project_configs.yaml \
+    --tokenizer_config configs/tokenizer_configs/default.yaml \
+    --train_config configs/train_configs/default.yaml \
+    --model_config configs/model_configs/default.yaml \
+    --optimizer_config configs/optimizer_configs/default.yaml \

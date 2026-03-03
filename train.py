@@ -11,11 +11,11 @@ from utils.load_config import load_config
 
 def parser_args():
     parser = ArgumentParser()
-    parser.add_argument("--project_config", type=str, required=True)
-    parser.add_argument("--tokenizer_config", type=str, required=True)
-    parser.add_argument("--train_config", type=str, required=True)
-    parser.add_argument("--model_config", type=str, required=True)
-    parser.add_argument("--optimizer_config", type=str, required=True)
+    parser.add_argument("--project_config", type=str)
+    parser.add_argument("--tokenizer_config", type=str)
+    parser.add_argument("--train_config", type=str)
+    parser.add_argument("--model_config", type=str)
+    parser.add_argument("--optimizer_config", type=str)
     return parser.parse_args()
 
 def train(args):
