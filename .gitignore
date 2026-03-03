@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+
+build/
+dist/
+wheels/
+pretrained/
+*.egg-info
+./ericzh_github_key
+*.pub
+# Virtual environments
+.venv/
+.cache/
+3rdparty/
+profiler_logs/
+
+# pth
+*.pth
+
+# exp folder
+exp/

@@ -1,0 +1,58 @@
+[project]
+name = "nanoLMengine"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "==3.12.0"
+dependencies = [
+    "accelerate>=0.26.0",
+    "huggingface-hub",
+    "huggingface_hub[cli]",
+    "torch==2.6.0",
+    "datasets>=3.3.0",
+    "torchvision==0.21.0",
+    "torchaudio==2.6.0",
+    "transformers>=4.45.0",
+    "timm",
+    "tyro",
+    "scipy",
+    "seaborn",
+    "spikingjelly==0.0.0.0.14",
+    "snntorch",
+    "cupy-cuda12x",
+    "setuptools==80.9.0",
+    "pandas",
+    "pytest==9.0.1",
+    "pytest-benchmark==5.1.0",
+    "pytest-cov==6.2.1",
+    "pytest-env==1.2.0",
+    "flake8==7.3.0",
+    "reuse==5.1.0",
+    "numpy==1.26.3",
+    "nvitop",
+    "matplotlib",
+    "lm-eval",
+    "flash-attn==2.7.3",
+    "torch-tb-profiler",
+    "tensorboard",
+    "pytorch-lightning==1.9.5",
+    "deepspeed",
+    "wandb",
+    "ninja",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+lm-eval = { path = "./3rdparty/lm-evaluation-harness", editable = true }
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
+
+[tool.uv]
+no-build-isolation-package = ["flash-attn"]
