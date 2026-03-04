@@ -151,6 +151,12 @@ def train(args):
     # print total params
     total_params = sum(p.numel() for p in model.parameters())
     rank_zero_info(f"Total params: {total_params}")
+
+    rank_zero_info(f"tokenizer vocab_size: {tokenizer.vocab_size}")
+    rank_zero_info(f"tokenizer eos_token_id: {tokenizer.eos_token_id}")
+    max_id = max(tokenizer.trie_tokenizer.idx2token.keys())
+    rank_zero_info(f"max_id in vocab: {max_id}")
+
     trainer = Trainer(**trainer_kwargs)
     trainer.fit(model, datamodule=datamodule)
 

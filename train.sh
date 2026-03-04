@@ -37,7 +37,7 @@ torchrun \
   --master_port=${MASTER_PORT} \
     train.py \
     --project_config configs/default_project_configs.yaml \
-    --tokenizer_config configs/tokenizer_configs/default.yaml \
+    --tokenizer_config configs/tokenizer_configs/rwkv.yaml \
     --train_config configs/train_configs/default.yaml \
     --model_config configs/model_configs/transformer_base.yaml \
     --optimizer_config configs/optimizer_configs/default.yaml \
