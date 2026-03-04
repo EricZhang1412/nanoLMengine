@@ -13,6 +13,7 @@ pretrained/
 .cache/
 3rdparty/
 profiler_logs/
+lightning_logs/
 
 # pth
 *.pth

@@ -13,7 +13,7 @@ HOSTNAME=$(hostname)
 
 NODE_RANK=${NODE_RANK:-0}
 MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-MASTER_PORT=${MASTER_PORT:-29500}
+MASTER_PORT=${MASTER_PORT:-29502}
 echo "NODE_RANK: ${NODE_RANK}, MASTER_ADDR: ${MASTER_ADDR}, MASTER_PORT: ${MASTER_PORT}"
 
 N_NODE=${N_NODE:-1}
@@ -22,6 +22,12 @@ GPU_PER_NODE=${GPU_PER_NODE:-1}
 export N_NODE=${N_NODE}
 export GPU_PER_NODE=${GPU_PER_NODE}
 echo "N_NODE: ${N_NODE}, GPU_PER_NODE: ${GPU_PER_NODE}"
+
+export HF_HOME=${SLURM_TMPDIR:-/tmp}/hf_cache_${USER}
+export HF_DATASETS_CACHE=$HF_HOME/datasets
+mkdir -p "$HF_DATASETS_CACHE"
+#### Domestic mirrors
+export HF_ENDPOINT=https://hf-mirror.com
 
 torchrun \
   --nnodes=${N_NODE}:${N_NODE} \
@@ -33,5 +39,5 @@ torchrun \
     --project_config configs/default_project_configs.yaml \
     --tokenizer_config configs/tokenizer_configs/default.yaml \
     --train_config configs/train_configs/default.yaml \
-    --model_config configs/model_configs/default.yaml \
+    --model_config configs/model_configs/transformer_base.yaml \
     --optimizer_config configs/optimizer_configs/default.yaml \

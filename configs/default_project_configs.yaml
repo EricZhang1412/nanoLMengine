@@ -1,0 +1,5 @@
+data_name: HuggingFaceFW/fineweb-edu
+path: /data/maluzhang-folder/datasets/fineweb-edu/
+sample: 100BT
+text_column: "text"
+dataset_split: "train"

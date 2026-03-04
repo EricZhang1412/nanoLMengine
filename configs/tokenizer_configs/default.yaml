@@ -1,1 +1,5 @@
-max_seq_len: 1024
+name: gpt2
+use_fast: true
+padding_side: right
+max_seq_len: 2048
+truncation: true

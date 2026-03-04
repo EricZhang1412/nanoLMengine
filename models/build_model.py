@@ -1,0 +1,128 @@
+# nanoLMengine/models/build_model.py
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import lightning as L
+from lightning.pytorch.utilities.rank_zero import rank_zero_info
+
+from .transformer.model import TransformerLM
+
+class LitLM(L.LightningModule):
+    def __init__(
+        self,
+        model: nn.Module,
+        optimizer_config: Any,
+        train_config: Any,
+        tokenizer: Any = None,
+    ):
+        super().__init__()
+        self.model = model
+        self.optimizer_config = optimizer_config
+        self.train_config = train_config
+        self.tokenizer = tokenizer
+        self.save_hyperparameters(ignore=["model", "tokenizer"])
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model(input_ids)
+
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
+        x, y = batch
+        logits = self(x)  # [B,T,V]
+
+        # CrossEntropy 需要 [N,V] vs [N]
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            y.reshape(-1),
+            reduction="mean",
+        )
+
+        self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+        return loss
+
+    def configure_optimizers(self):
+        lr = float(getattr(self.optimizer_config, "lr", 3e-4))
+        betas = getattr(self.optimizer_config, "betas", (0.9, 0.95))
+        weight_decay = float(getattr(self.optimizer_config, "weight_decay", 0.1))
+
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=lr,
+            betas=betas,
+            weight_decay=weight_decay,
+        )
+
+        sched_name = getattr(self.optimizer_config, "scheduler", None)
+        if not sched_name:
+            return optimizer
+
+        if sched_name == "cosine":
+            max_steps = int(getattr(self.train_config, "max_steps", 0) or 0)
+            if max_steps <= 0:
+                rank_zero_info("scheduler=cosine but max_steps not set; return optimizer only.")
+                return optimizer
+
+            warmup_steps = int(getattr(self.optimizer_config, "warmup_steps", 0) or 0)
+
+            def lr_lambda(step: int):
+                if step < warmup_steps and warmup_steps > 0:
+                    return float(step) / float(max(1, warmup_steps))
+                # cosine decay
+                progress = float(step - warmup_steps) / float(max(1, max_steps - warmup_steps))
+                progress = min(max(progress, 0.0), 1.0)
+                return 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.1415926535))).item()
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",
+                },
+            }
+
+        rank_zero_info(f"Unknown scheduler={sched_name}; return optimizer only.")
+        return optimizer
+
+def build_model(
+    model_config: Any,
+    optimizer_config: Any,
+    train_config: Any,
+    tokenizer_config: Any = None,
+    tokenizer: Any = None,
+) -> LitLM:
+    if tokenizer is None:
+        raise ValueError("tokenizer must be provided to build_model (for vocab_size/eos/pad).")
+
+    vocab_size = int(getattr(tokenizer, "vocab_size", None) or 0)
+    if vocab_size <= 0:
+        raise ValueError(f"Invalid tokenizer vocab_size={vocab_size}")
+
+    d_model = int(getattr(model_config, "d_model", 768))
+
+    # ✅ 这里换成你自己的真实模型类
+    model = TransformerLM(
+        vocab_size=tokenizer.vocab_size,
+        ctx_len=tokenizer_config.max_seq_len,
+        d_model=model_config.d_model,
+        n_layer=model_config.n_layer,
+        n_head=model_config.n_head,
+        dropout=model_config.dropout,
+    )
+
+    rank_zero_info(f"Model core: {model.__class__.__name__}")
+    rank_zero_info(f"vocab_size={vocab_size}, d_model={d_model}")
+
+    lit_model = LitLM(
+        model=model,
+        optimizer_config=optimizer_config,
+        train_config=train_config,
+        tokenizer=tokenizer,
+    )
+    return lit_model
