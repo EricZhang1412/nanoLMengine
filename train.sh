@@ -29,6 +29,12 @@ mkdir -p "$HF_DATASETS_CACHE"
 #### Domestic mirrors
 export HF_ENDPOINT=https://hf-mirror.com
 
+#### Special PATH vars for RWKV7
+export RWKV_JIT_ON=1
+export MAX_JOBS=${MAX_JOBS:-8} # ninja workers for jit
+# export TORCH_CUDA_ARCH_LIST="9.0"
+export CUDA_LAUNCH_BLOCKING=1
+
 torchrun \
   --nnodes=${N_NODE}:${N_NODE} \
   --nproc_per_node=${GPU_PER_NODE} \
@@ -39,5 +45,5 @@ torchrun \
     --project_config configs/default_project_configs.yaml \
     --tokenizer_config configs/tokenizer_configs/rwkv.yaml \
     --train_config configs/train_configs/default.yaml \
-    --model_config configs/model_configs/transformer_base.yaml \
+    --model_config configs/model_configs/rwkv7_base.yaml \
     --optimizer_config configs/optimizer_configs/default.yaml \

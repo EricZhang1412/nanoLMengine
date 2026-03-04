@@ -2,21 +2,20 @@
 # The RWKV Language Model - https://github.com/BlinkDL/RWKV-LM
 ########################################################################################################
 
-import os, math, gc, importlib
+import os, math, gc, importlib, sys
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import pytorch_lightning as pl
-from pytorch_lightning.utilities import rank_zero_info, rank_zero_only
-from pytorch_lightning.strategies import DeepSpeedStrategy
-if importlib.util.find_spec('deepspeed'):
+import lightning as L
+from lightning.pytorch.utilities.rank_zero import rank_zero_info
+from lightning.pytorch.strategies import DeepSpeedStrategy
+try:
     import deepspeed
     from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
-
-try:
-    print('RWKV_MY_TESTING', os.environ["RWKV_MY_TESTING"])
-except:
-    os.environ["RWKV_MY_TESTING"] = ''
+except Exception:
+    deepspeed = None
+    DeepSpeedCPUAdam = None
+    FusedAdam = None
 
 def __nop(ob):
     return ob
@@ -24,7 +23,7 @@ def __nop(ob):
 
 MyModule = nn.Module
 MyFunction = __nop
-if os.environ["RWKV_JIT_ON"] == "1":
+if os.environ.get("RWKV_JIT_ON", "1") == "1":
     MyModule = torch.jit.ScriptModule
     MyFunction = torch.jit.script_method
 
@@ -34,77 +33,91 @@ if os.environ["RWKV_JIT_ON"] == "1":
 ########################################################################################################
 
 from torch.utils.cpp_extension import load
+HEAD_SIZE = int(os.environ.get("RWKV_HEAD_SIZE", "64"))
+CHUNK_LEN = 16
 
-HEAD_SIZE = int(os.environ["RWKV_HEAD_SIZE"])
+cusparse_inc = None
+try:
+    import nvidia.cusparse
+    cusparse_inc = os.path.join(os.path.dirname(nvidia.cusparse.__file__), "include")
+except ImportError:
+    pass
 
-if 'x070' in os.environ["RWKV_MY_TESTING"]:
-    CHUNK_LEN = 16
+if not cusparse_inc:
+    # Check current environment (uv/venv)
+    _python_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    _path = os.path.join(sys.prefix, "lib", _python_ver, "site-packages", "nvidia", "cusparse", "include")
+    if os.path.exists(_path):
+        cusparse_inc = _path
+    elif "CONDA_PREFIX" in os.environ:
+        # Fallback to CONDA_PREFIX
+        _path = os.path.join(os.environ["CONDA_PREFIX"], "lib", _python_ver, "site-packages", "nvidia", "cusparse", "include")
+        if os.path.exists(_path):
+            cusparse_inc = _path
 
-    cusparse_inc = os.path.join(
-        os.environ["CONDA_PREFIX"],
-        "lib/python3.11/site-packages/nvidia/cusparse/include",
-    )
-    flags = [
-        '-res-usage', 
-        f'-D_C_={HEAD_SIZE}', 
-        f"-D_CHUNK_LEN_={CHUNK_LEN}", 
-        "--use_fast_math", 
-        "-O3", 
-        "-Xptxas -O3", 
-        "--extra-device-vectorization"
-    ]
+if not cusparse_inc:
+    rank_zero_info("WARNING: cusparse include path not found, using default.")
+    cusparse_inc = "/usr/local/cuda/include"
 
-    load(
-        name="wind_backstepping", 
-        sources=[f'cuda/wkv7_cuda.cu', 'cuda/wkv7_op.cpp'],
-        extra_include_paths=["/usr/local/cuda/include", cusparse_inc],
-        is_python_module=False, 
-        verbose=True, 
-        extra_cuda_cflags=flags
-    )
+flags = [
+    '-res-usage', 
+    f'-D_C_={HEAD_SIZE}', 
+    f"-D_CHUNK_LEN_={CHUNK_LEN}", 
+    "--use_fast_math", 
+    "-O3", 
+    "-Xptxas -O3", 
+    "--extra-device-vectorization"
+]
+_curr_dir = os.path.dirname(os.path.abspath(__file__))
+load(
+    name="wind_backstepping", 
+    sources=[os.path.join(_curr_dir, 'cuda', 'wkv7_cuda.cu'), os.path.join(_curr_dir, 'cuda', 'wkv7_op.cpp')],
+    extra_include_paths=["/usr/local/cuda/include", cusparse_inc],
+    is_python_module=False, 
+    verbose=True, 
+    extra_cuda_cflags=flags
+)
+class WindBackstepping(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, w,q,k,v,z,b):
+        B,T,H,C = w.shape 
+        assert T%CHUNK_LEN == 0 # if T%CHUNK_LEN != 0: pad your input to T%CHUNK_LEN == 0, or change CHUNK_LEN (will be slower)
+        assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,z,b])
+        assert all(i.is_contiguous() for i in [w,q,k,v,z,b])
+        y = torch.empty_like(v)
+        s = torch.empty(B,H,T//CHUNK_LEN,C,C, dtype=torch.float32,device=w.device)
+        sa = torch.empty(B,T,H,C, dtype=torch.float32,device=w.device)
+        torch.ops.wind_backstepping.forward(w,q,k,v,z,b, y,s,sa)
+        ctx.save_for_backward(w,q,k,v,z,b,s,sa)
+        return y
+    @staticmethod
+    def backward(ctx, dy):
+        assert all(i.dtype==torch.bfloat16 for i in [dy])
+        assert all(i.is_contiguous() for i in [dy])
+        w,q,k,v,z,b,s,sa = ctx.saved_tensors
+        dw,dq,dk,dv,dz,db = [torch.empty_like(x) for x in [w,q,k,v,z,b]]
+        torch.ops.wind_backstepping.backward(w,q,k,v,z,b, dy,s,sa, dw,dq,dk,dv,dz,db)
+        return dw,dq,dk,dv,dz,db
+def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
+    B,T,HC = q.shape
+    # cast + contiguous
+    q,w,k,v,a,b = [i.to(torch.bfloat16).contiguous() for i in [q,w,k,v,a,b]]
+    q,w,k,v,a,b = [i.view(B,T,HC//64,64) for i in [q,w,k,v,a,b]]
+    return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)
 
-    class WindBackstepping(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, w,q,k,v,z,b):
-            B,T,H,C = w.shape 
-            assert T%CHUNK_LEN == 0 # if T%CHUNK_LEN != 0: pad your input to T%CHUNK_LEN == 0, or change CHUNK_LEN (will be slower)
-            assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,z,b])
-            assert all(i.is_contiguous() for i in [w,q,k,v,z,b])
-            y = torch.empty_like(v)
-            s = torch.empty(B,H,T//CHUNK_LEN,C,C, dtype=torch.float32,device=w.device)
-            sa = torch.empty(B,T,H,C, dtype=torch.float32,device=w.device)
-            torch.ops.wind_backstepping.forward(w,q,k,v,z,b, y,s,sa)
-            ctx.save_for_backward(w,q,k,v,z,b,s,sa)
-            return y
-        @staticmethod
-        def backward(ctx, dy):
-            assert all(i.dtype==torch.bfloat16 for i in [dy])
-            assert all(i.is_contiguous() for i in [dy])
-            w,q,k,v,z,b,s,sa = ctx.saved_tensors
-            dw,dq,dk,dv,dz,db = [torch.empty_like(x) for x in [w,q,k,v,z,b]]
-            torch.ops.wind_backstepping.backward(w,q,k,v,z,b, dy,s,sa, dw,dq,dk,dv,dz,db)
-            return dw,dq,dk,dv,dz,db
-
-    def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
-        B,T,HC = q.shape
-        q,w,k,v,a,b = [i.view(B,T,HC//64,64) for i in [q,w,k,v,a,b]]
-        return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)
-
-########################################################################################################
 
 class RWKV_Tmix_x070(MyModule):
     def __init__(self, args, layer_id):
         super().__init__()
         self.args = args
         self.layer_id = layer_id
-        self.my_testing = args.my_testing
 
         self.head_size = args.head_size
         self.n_head = args.dim_att // self.head_size
         assert args.dim_att % self.n_head == 0
         H = self.n_head
         N = self.head_size
-        C = args.n_embd
+        C = args.n_embed
 
         with torch.no_grad():
             ratio_0_to_1 = layer_id / (args.n_layer - 1)  # 0 to 1
@@ -225,15 +238,15 @@ class RWKV_CMix_x070(MyModule):
 
         with torch.no_grad():
             ratio_1_to_almost0 = 1.0 - (layer_id / args.n_layer)  # 1 to ~0
-            ddd = torch.ones(1, 1, args.n_embd)
-            for i in range(args.n_embd):
-                ddd[0, 0, i] = i / args.n_embd
+            ddd = torch.ones(1, 1, args.n_embed)
+            for i in range(args.n_embed):
+                ddd[0, 0, i] = i / args.n_embed
             self.x_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0**4))
 
-        self.key = nn.Linear(args.n_embd, args.n_embd * 4, bias=False)
-        self.value = nn.Linear(args.n_embd * 4, args.n_embd, bias=False)
+        self.key = nn.Linear(args.n_embed, args.n_embed * 4, bias=False)
+        self.value = nn.Linear(args.n_embed * 4, args.n_embed, bias=False)
 
-        self.key.weight.data.uniform_(-0.5/(args.n_embd**0.5), 0.5/(args.n_embd**0.5))
+        self.key.weight.data.uniform_(-0.5/(args.n_embed**0.5), 0.5/(args.n_embed**0.5))
         self.value.weight.data.zero_()
 
     @MyFunction
@@ -245,22 +258,17 @@ class RWKV_CMix_x070(MyModule):
 
         return self.value(k)
 
-
-########################################################################################################
-# The RWKV Model with our blocks
-########################################################################################################
-
-class Block(nn.Module):
+class RWKV7Block(nn.Module):
     def __init__(self, args, layer_id):
         super().__init__()
         self.args = args
         self.layer_id = layer_id
 
-        self.ln1 = nn.LayerNorm(args.n_embd)
-        self.ln2 = nn.LayerNorm(args.n_embd)
+        self.ln1 = nn.LayerNorm(args.n_embed)
+        self.ln2 = nn.LayerNorm(args.n_embed)
 
         if self.layer_id == 0:
-            self.ln0 = nn.LayerNorm(args.n_embd)
+            self.ln0 = nn.LayerNorm(args.n_embed)
 
         self.att = RWKV_Tmix_x070(args, layer_id)
         self.ffn = RWKV_CMix_x070(args, layer_id)
@@ -293,72 +301,24 @@ class L2Wrap(torch.autograd.Function):
         return (grad_output, gy)
 
 
-class RWKV(pl.LightningModule):
-    def __init__(self, args):
+class RWKV7Model(nn.Module):
+    def __init__(self, args, BlockCls):
         super().__init__()
         self.args = args
-        if not hasattr(args, 'dim_att'):
-            args.dim_att = args.n_embd
-        if not hasattr(args, 'dim_ffn'):
-            args.dim_ffn = int((args.n_embd * 3.5) // 32 * 32) # default = 3.5x emb size            
-        assert args.n_embd % 32 == 0
+
+        if not hasattr(args, "dim_att"):
+            args.dim_att = args.n_embed
+        if not hasattr(args, "dim_ffn"):
+            args.dim_ffn = int((args.n_embed * 3.5) // 32 * 32)
+
+        assert args.n_embed % 32 == 0
         assert args.dim_att % 32 == 0
         assert args.dim_ffn % 32 == 0
 
-        self.emb = nn.Embedding(args.vocab_size, args.n_embd)
-
-        self.blocks = nn.ModuleList([Block(args, i) for i in range(args.n_layer)])
-
-        self.ln_out = nn.LayerNorm(args.n_embd)
-        self.head = nn.Linear(args.n_embd, args.vocab_size, bias=False)
-
-    def configure_optimizers(self):
-        args = self.args
-        
-        lr_decay = set()
-        lr_1x = set()
-        lr_2x = set()
-        for n, p in self.named_parameters():
-            if ("att.w0" in n):
-                lr_2x.add(n)
-            elif (len(p.squeeze().shape) >= 2) and (args.weight_decay > 0) and (".weight" in n):
-                lr_decay.add(n)
-            else:
-                lr_1x.add(n)
-
-        lr_decay = sorted(list(lr_decay))
-        lr_1x = sorted(list(lr_1x))
-        lr_2x = sorted(list(lr_2x))
-
-        if self.trainer.is_global_zero:
-            print('decay', lr_decay, '\n')
-            print('1x', lr_1x, '\n')
-            print('2x', lr_2x, '\n')
-
-        param_dict = {n: p for n, p in self.named_parameters()}
-        
-        optim_groups = [
-            {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0},
-            {"params": [param_dict[n] for n in lr_2x], "weight_decay": 0.0, "my_lr_scale": 2.0},
-        ]
-
-        if args.weight_decay > 0:
-            optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": args.weight_decay, "my_lr_scale": 1.0}]
-            if self.deepspeed_offload:
-                return DeepSpeedCPUAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adamw_mode=True, amsgrad=False)
-            return FusedAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adam_w_mode=True, amsgrad=False)
-        else:
-            if self.deepspeed_offload:
-                return DeepSpeedCPUAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adamw_mode=False, weight_decay=0, amsgrad=False)
-            return FusedAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adam_w_mode=False, weight_decay=0, amsgrad=False)
-
-    @property
-    def deepspeed_offload(self) -> bool:
-        strategy = self.trainer.strategy
-        if isinstance(strategy, DeepSpeedStrategy):
-            cfg = strategy.config["zero_optimization"]
-            return cfg.get("offload_optimizer") or cfg.get("offload_param")
-        return False
+        self.emb = nn.Embedding(args.vocab_size, args.n_embed)
+        self.blocks = nn.ModuleList([BlockCls(args, i) for i in range(args.n_layer)])
+        self.ln_out = nn.LayerNorm(args.n_embed)
+        self.head = nn.Linear(args.n_embed, args.vocab_size, bias=False)
 
     def forward(self, idx):
         args = self.args
@@ -369,7 +329,7 @@ class RWKV(pl.LightningModule):
 
         v_first = torch.empty_like(x)
         for block in self.blocks:
-            if args.grad_cp == 1:
+            if getattr(args, "grad_cp", 0) == 1 and deepspeed is not None:
                 x, v_first = deepspeed.checkpointing.checkpoint(block, x, v_first)
             else:
                 x, v_first = block(x, v_first)
@@ -378,98 +338,125 @@ class RWKV(pl.LightningModule):
         x = self.head(x)
         return x
 
+class LitRWKV(L.LightningModule):
+    def __init__(self, core: nn.Module, args, optimizer_config=None, train_config=None):
+        super().__init__()
+        self.core = core
+        self.args = args
+        self.optimizer_config = optimizer_config
+        self.train_config = train_config
+        self.save_hyperparameters(ignore=["core"])
+    
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        return self.core(idx)
+
+    @property
+    def deepspeed_offload(self) -> bool:
+        # Lightning 2.x 仍然可以这么判断
+        strategy = getattr(self.trainer, "strategy", None)
+        if isinstance(strategy, DeepSpeedStrategy):
+            cfg = strategy.config.get("zero_optimization", {})
+            return bool(cfg.get("offload_optimizer") or cfg.get("offload_param"))
+        return False
+
     def training_step(self, batch, batch_idx):
         idx, targets = batch
-        logits = self(idx)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        logits = self(idx)  # [B,T,V]
+
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            targets.reshape(-1),
+            reduction="mean",
+        )
+        self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
         return L2Wrap.apply(loss, logits)
 
-    def training_step_end(self, batch_parts):
-        all = self.all_gather(batch_parts)
-        if self.trainer.is_global_zero:
-            self.trainer.my_loss_all = all
+    def configure_optimizers(self):
+        args = self.args
+        lr = float(getattr(self.optimizer_config, "lr", getattr(args, "lr_init", 3e-4)))
+        betas = getattr(self.optimizer_config, "betas", getattr(args, "betas", (0.9, 0.95)))
+        adam_eps = float(getattr(self.optimizer_config, "adam_eps", getattr(args, "adam_eps", 1e-8)))
+        weight_decay = float(getattr(self.optimizer_config, "weight_decay", getattr(args, "weight_decay", 0.0)))
 
-    def generate_init_weight(self):
-        print(
-            f"""
-############################################################################
-#
-# Init model weight (slow for large models)...
-#
-############################################################################
-"""
-        )
-        m = {}
-        n_params = 0
-        for n in self.state_dict():
-            p = self.state_dict()[n]
-            shape = p.shape
-
-            s0 = str(shape[0]) if len(shape) > 0 else ""
-            s1 = str(shape[1]) if len(shape) > 1 else ""
-            s2 = str(shape[2]) if len(shape) > 2 else ""
-            s3 = str(shape[3]) if len(shape) > 3 else ""
-            print(f"{s0.ljust(5)} {s1.ljust(5)} {s2.ljust(5)} {s3.ljust(5)} {n}", end="")
-
-            scale = 1.0
-            if "ln_" in n or ".ln" in n or "time_" in n or "_mask" in n or "pos_emb" in n or '.mask.' in n or n.endswith('_w') or n.endswith('_w1') or n.endswith('_w2') or n.endswith('_bias') or (".weight" not in n):
-                if 'ln_x.weight' in n:
-                    layer_scale = (1+int(n.split('.')[1])) / self.args.n_layer
-                    m[n] = (p * 0.0) + (layer_scale ** 0.7)
-                else:
-                    m[n] = p
-                print()
-            elif n == "emb.weight":
-                m[n] = p
-                scale = -1e-4
-                nn.init.uniform_(m[n], a=scale, b=-scale)
-                print(f" [scale {scale}]")
-            elif n == "head.weight":
-                m[n] = p
-                if self.args.vocab_size > self.args.n_embd:
-                    scale = 0.5 * math.sqrt(self.args.vocab_size / self.args.n_embd)
-                else:
-                    scale = 0.5
-                nn.init.orthogonal_(m[n], gain=scale)
-                print(f" [scale {scale}]")
+        lr_decay, lr_1x, lr_2x = set(), set(), set()
+        for n, p in self.named_parameters():
+            if "att.w0" in n:
+                lr_2x.add(n)
+            elif (len(p.squeeze().shape) >= 2) and (weight_decay > 0) and (".weight" in n):
+                lr_decay.add(n)
             else:
-                assert n.endswith('.weight') # should always be true
+                lr_1x.add(n)
 
-                zero = [".att.output.", ".ffn.value.", ".ffn.receptance.", ".ffnPre.value.", ".ffnPre.receptance.", "head_q.", '.oo.', '.rr.']
+        lr_decay = sorted(lr_decay)
+        lr_1x = sorted(lr_1x)
+        lr_2x = sorted(lr_2x)
 
-                for kk in zero:
-                    if kk in n:
-                        scale = 0
+        if self.trainer.is_global_zero:
+            rank_zero_info(f"decay: {lr_decay}")
+            rank_zero_info(f"1x: {lr_1x}")
+            rank_zero_info(f"2x: {lr_2x}")
 
-                for kk in [".att.key."]:
-                    if kk in n:
-                        scale = 0.1
-                for kk in [".att.gate."]:
-                    if kk in n:
-                        scale = 0.1
+        param_dict = {n: p for n, p in self.named_parameters()}
 
-                print(f" [scale {scale}]")
+        optim_groups = [
+            {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0},
+            {"params": [param_dict[n] for n in lr_2x], "weight_decay": 0.0, "my_lr_scale": 2.0},
+        ]
+        if weight_decay > 0:
+            optim_groups.append({"params": [param_dict[n] for n in lr_decay], "weight_decay": weight_decay, "my_lr_scale": 1.0})
 
-                if self.args.accelerator.upper() == "GPU":
-                    m[n] = torch.empty((shape[0], shape[1]), device="cuda")
-                else:
-                    m[n] = torch.empty((shape[0], shape[1]))
+        use_deepspeed_adam = (
+            (deepspeed is not None)
+            and (FusedAdam is not None)
+            and isinstance(getattr(self.trainer, "strategy", None), DeepSpeedStrategy)
+        )
 
-                if scale == 0:
-                    nn.init.zeros_(m[n])
-                elif scale < 0:
-                    nn.init.uniform_(m[n], a=scale, b=-scale)
-                else:
-                    nn.init.orthogonal_(m[n], gain=scale)
+        if use_deepspeed_adam:
+            if self.deepspeed_offload and DeepSpeedCPUAdam is not None:
+                optimizer = DeepSpeedCPUAdam(
+                    optim_groups, lr=lr, betas=betas, eps=adam_eps,
+                    bias_correction=True,
+                    adamw_mode=(weight_decay > 0),
+                    amsgrad=False,
+                )
+            else:
+                optimizer = FusedAdam(
+                    optim_groups, lr=lr, betas=betas, eps=adam_eps,
+                    bias_correction=True,
+                    adam_w_mode=(weight_decay > 0),
+                    amsgrad=False,
+                )
+        else:
+            optimizer = torch.optim.AdamW(
+                optim_groups,
+                lr=lr,
+                betas=betas,
+                eps=adam_eps,
+                weight_decay=0.0,
+            )
 
-            m[n] = m[n].cpu()
-            if os.environ["RWKV_FLOAT_MODE"] == "fp16":
-                m[n] = m[n].half()
-            elif os.environ["RWKV_FLOAT_MODE"] == "bf16":
-                m[n] = m[n].bfloat16()
-            n_params += m[n].numel()
+        sched_name = getattr(self.optimizer_config, "scheduler", None) if self.optimizer_config is not None else None
+        if not sched_name:
+            return optimizer
 
-        print('model params', n_params)
-        gc.collect()
-        torch.cuda.empty_cache()
-        return m
+        if sched_name == "cosine":
+            max_steps = int(getattr(self.train_config, "max_steps", 0) or 0) if self.train_config is not None else 0
+            warmup_steps = int(getattr(self.optimizer_config, "warmup_steps", 0) or 0) if self.optimizer_config is not None else 0
+            if max_steps <= 0:
+                rank_zero_info("scheduler=cosine but max_steps not set; return optimizer only.")
+                return optimizer
+
+            def lr_lambda(step: int):
+                if warmup_steps > 0 and step < warmup_steps:
+                    return float(step) / float(max(1, warmup_steps))
+                progress = float(step - warmup_steps) / float(max(1, max_steps - warmup_steps))
+                progress = min(max(progress, 0.0), 1.0)
+                return 0.5 * (1.0 + math.cos(progress * math.pi))
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+            }
+        rank_zero_info(f"Unknown scheduler={sched_name}; return optimizer only.")
+        return optimizer

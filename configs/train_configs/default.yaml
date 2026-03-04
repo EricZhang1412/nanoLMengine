@@ -1,5 +1,5 @@
 trainer:
-  strategy: fsdp
+  strategy: auto
   precision: bf16-mixed
   max_epochs: 10
   gradient_clip_val: 0.0

@@ -150,6 +150,11 @@ def train(args):
         tokenizer=tokenizer
     )
 
+    if model_config.name == "rwkv7" and hasattr(model_config, "jit_on"):
+        os.environ["RWKV_JIT_ON"] = "1" if model_config.jit_on else "0"
+    if model_config.name == "rwkv7" and hasattr(model_config, "head_size"):
+        os.environ["RWKV_HEAD_SIZE"] = str(model_config.head_size)
+
     model = build_model(
         model_config=model_config,
         optimizer_config=optimizer_config,

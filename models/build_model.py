@@ -13,6 +13,7 @@ import lightning as L
 from lightning.pytorch.utilities.rank_zero import rank_zero_info
 
 from .transformer.model import TransformerLM
+from .rwkv7.model import RWKV7Model, LitRWKV, RWKV7Block
 
 class LitLM(L.LightningModule):
     def __init__(
@@ -106,23 +107,39 @@ def build_model(
 
     d_model = int(getattr(model_config, "d_model", 768))
 
-    # ✅ 这里换成你自己的真实模型类
-    model = TransformerLM(
-        vocab_size=tokenizer.vocab_size,
-        ctx_len=tokenizer_config.max_seq_len,
-        d_model=model_config.d_model,
-        n_layer=model_config.n_layer,
-        n_head=model_config.n_head,
-        dropout=model_config.dropout,
-    )
+    if model_config.name == "transformer": 
+        model = TransformerLM(
+            vocab_size=tokenizer.vocab_size,
+            ctx_len=tokenizer_config.max_seq_len,
+            d_model=model_config.d_model,
+            n_layer=model_config.n_layer,
+            n_head=model_config.n_head,
+            dropout=model_config.dropout,
+        )
+        rank_zero_info(f"Model core: {model.__class__.__name__}")
+        rank_zero_info(f"vocab_size={vocab_size}, d_model={d_model}")
 
-    rank_zero_info(f"Model core: {model.__class__.__name__}")
-    rank_zero_info(f"vocab_size={vocab_size}, d_model={d_model}")
+        lit_model = LitLM(
+            model=model,
+            optimizer_config=optimizer_config,
+            train_config=train_config,
+            tokenizer=tokenizer,
+        )
+        return lit_model
 
-    lit_model = LitLM(
-        model=model,
-        optimizer_config=optimizer_config,
-        train_config=train_config,
-        tokenizer=tokenizer,
-    )
-    return lit_model
+    elif model_config.name == "rwkv7": 
+        args = model_config
+        args.vocab_size = tokenizer.vocab_size
+        args.ctx_len = tokenizer_config.max_seq_len
+        base_model = RWKV7Model(args=args, BlockCls=RWKV7Block)
+        rank_zero_info(f"Base Model: {base_model.__class__.__name__}")
+        lit = LitRWKV(
+            core=base_model,
+            args=args,
+            optimizer_config=optimizer_config,
+            train_config=train_config,
+        )
+        return lit
+
+    else: 
+        raise ValueError(f"Unknown model: {model_config.name}")
