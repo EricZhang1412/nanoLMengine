@@ -2,17 +2,19 @@ import os
 import datetime
 import numpy as np
 import torch
-
+import functools
 import lightning as L
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.utilities.rank_zero import rank_zero_info
-
+from lightning.pytorch.strategies import FSDPStrategy
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.utils.data import DataLoader
 
 from utils.load_config import load_config
 from utils.hf_dataset import load_project_dataset, HFDataset  # 你原来的函数（里面调用 load_dataset）
 from utils.tokenizer.base import build_tokenizer
 from models.build_model import build_model
+from models.transformer.model import TransformerBlock
 
 
 
@@ -111,9 +113,21 @@ def train(args):
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True
 
+    trainer_strategy = train_config.trainer.strategy
+    if isinstance(trainer_strategy, str) and trainer_strategy.lower() == "fsdp":
+        auto_wrap_policy = functools.partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={TransformerBlock},
+        )
+        trainer_strategy = FSDPStrategy(
+            auto_wrap_policy=auto_wrap_policy,
+            activation_checkpointing=TransformerBlock,  # 省显存，建议开
+            use_orig_params=True,  # 对 weight tying 更友好（如你的 torch 版本支持）
+        )
+
     # Trainer kwargs（Lightning 2.6.1）
     trainer_kwargs = dict(
-        strategy=train_config.trainer.strategy,     # "deepspeed_stage_2" / "ddp" 
+        strategy=trainer_strategy,     # "deepspeed_stage_2" / "ddp" 
         precision=train_config.trainer.precision,   # "bf16-mixed"/"16-mixed"/"32-true" 
         devices=int(os.environ.get("GPU_PER_NODE", "1")),
         num_nodes=int(os.environ.get("N_NODE", "1")),
@@ -136,10 +150,6 @@ def train(args):
         tokenizer=tokenizer
     )
 
-    # TODO: 这里换成你真实的 LightningModule
-    # from your_package.model import MyLitModule
-    # model = MyLitModule(model_config, optimizer_config, tokenizer_config, train_config)
-    # model = None  # <- 你必须替换掉
     model = build_model(
         model_config=model_config,
         optimizer_config=optimizer_config,

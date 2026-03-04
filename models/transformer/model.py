@@ -6,8 +6,9 @@ import torch.nn.functional as F
 
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, d_model, n_head, dropout=0.1):
+    def __init__(self, d_model, n_head, dropout=0.1, attn_type="naive"):
         super().__init__()
+        self.attn_type = attn_type
         assert d_model % n_head == 0
 
         self.n_head = n_head
@@ -17,6 +18,19 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(dropout)
         self.resid_dropout = nn.Dropout(dropout)
 
+        self._flash_attn = None
+
+    def _get_flash_attn(self):
+        if self._flash_attn is None:
+            try:
+                from flash_attn import flash_attn_func
+            except Exception as e:
+                raise ImportError(
+                    "flash-attn is not available. Please install flash-attn to use attn_type='flash_attn'."
+                ) from e
+            self._flash_attn = flash_attn_func
+        return self._flash_attn
+
     def forward(self, x):
         B, T, C = x.shape
         qkv = self.qkv(x)
@@ -25,15 +39,42 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if self.attn_type == "naive":
+            att = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
 
-        mask = torch.tril(torch.ones(T, T, device=x.device)).view(1, 1, T, T)
-        att = att.masked_fill(mask == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
+            mask = torch.tril(torch.ones(T, T, device=x.device)).view(1, 1, T, T)
+            att = att.masked_fill(mask == 0, float("-inf"))
+            att = F.softmax(att, dim=-1)
+            att = self.attn_dropout(att)
 
-        y = att @ v
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
+            y = att @ v
+            y = y.transpose(1, 2).contiguous().view(B, T, C)
+        elif self.attn_type == "sdpa_torch":
+            # PyTorch 2.x: flash/mem-efficient
+            y = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=None,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
+                is_causal=True,
+            )
+            y = y.transpose(1, 2).contiguous().view(B, T, C)
+
+        elif self.attn_type == "flash_attn":
+            flash_attn_func = self._get_flash_attn()
+            q_ = q.transpose(1, 2)  # (B, T, nh, hd)
+            k_ = k.transpose(1, 2)
+            v_ = v.transpose(1, 2)
+
+            y_ = flash_attn_func(
+                q_, k_, v_,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
+                softmax_scale=None,
+                causal=True,
+            )  # (B, T, nh, hd)  :contentReference[oaicite:1]{index=1}
+            y = y_.transpose(1, 2).contiguous().view(B, T, C)
+        else:
+            raise ValueError(f"Unknown attn_type: {self.attn_type}")
+
         y = self.resid_dropout(self.proj(y))
 
         return y
@@ -60,11 +101,11 @@ class MLP(nn.Module):
 
 class TransformerBlock(nn.Module):
 
-    def __init__(self, d_model, n_head, dropout=0.1):
+    def __init__(self, d_model, n_head, dropout=0.1, attn_type="naive"):
         super().__init__()
 
         self.ln1 = nn.LayerNorm(d_model)
-        self.attn = CausalSelfAttention(d_model, n_head, dropout)
+        self.attn = CausalSelfAttention(d_model, n_head, dropout, attn_type)
 
         self.ln2 = nn.LayerNorm(d_model)
         self.mlp = MLP(d_model, dropout)
@@ -85,6 +126,7 @@ class TransformerLM(nn.Module):
         n_layer=12,
         n_head=12,
         dropout=0.1,
+        attn_type="naive",
     ):
         super().__init__()
         self.ctx_len = ctx_len
@@ -93,7 +135,7 @@ class TransformerLM(nn.Module):
 
         self.blocks = nn.ModuleList(
             [
-                TransformerBlock(d_model, n_head, dropout)
+                TransformerBlock(d_model, n_head, dropout, attn_type)
                 for _ in range(n_layer)
             ]
         )
