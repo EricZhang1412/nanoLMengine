@@ -24,28 +24,29 @@ def parser_args():
     parser.add_argument("--train_config", type=str)
     parser.add_argument("--model_config", type=str)
     parser.add_argument("--optimizer_config", type=str)
-    # parser = add_trainer_args(parser)
-    group = parser.add_argument_group("Trainer")
-    group.add_argument("--strategy", type=str, default="ddp")
-    group.add_argument("--precision", type=str, default="bf16")
-    group.add_argument("--gpus", type=int, default=1)
-    group.add_argument("--num_nodes", type=int, default=1)
-    group.add_argument("--max_epochs", type=int, default=10)
-    group.add_argument("--gradient_clip_val", type=float, default=0.0)
-    group.add_argument("--log_every_n_steps", type=int, default=100)
-    group.add_argument("--check_val_every_n_epoch", type=int, default=1)
-    group.add_argument("--val_check_interval", type=float, default=0.5)
-    group.add_argument("--resume_from_checkpoint", type=str, default=None)
     return parser.parse_args()
 
 def train(args):
     rank_zero_info("########## training in progress ##########")
+
     project_config = load_config(args.project_config)
     tokenizer_config = load_config(args.tokenizer_config)
     train_config = load_config(args.train_config)
     model_config = load_config(args.model_config)
     optimizer_config = load_config(args.optimizer_config)
 
+    trainer_kwargs = dict(
+        strategy=train_config.trainer.strategy,
+        precision=train_config.trainer.precision,
+        devices=int(os.environ["GPU_PER_NODE"]),
+        num_nodes=int(os.environ["N_NODE"]),
+        max_epochs=train_config.trainer.max_epochs,
+        gradient_clip_val=train_config.trainer.gradient_clip_val,
+        log_every_n_steps=train_config.trainer.log_every_n_steps,
+        check_val_every_n_epoch=train_config.trainer.check_val_every_n_epoch,
+        val_check_interval=train_config.trainer.val_check_interval,
+        enable_checkpointing=train_config.trainer.enable_checkpointing,
+    )
     if train_config.random_seed >= 0:
         print(f"########## WARNING: GLOBAL SEED {train_config.random_seed} THIS WILL AFFECT MULTIGPU SAMPLING ##########\n")
         seed_everything(train_config.random_seed)
@@ -75,6 +76,8 @@ def train(args):
     """
     )
     rank_zero_info(str(vars(args)) + "\n")
+
+    model_pretrainer = Trainer(**trainer_kwargs)
 if __name__ == "__main__":  
     args = parser_args()
     train(args)
