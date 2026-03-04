@@ -133,6 +133,8 @@ def build_model(
         args.ctx_len = tokenizer_config.max_seq_len
         base_model = RWKV7Model(args=args, BlockCls=RWKV7Block)
         rank_zero_info(f"Base Model: {base_model.__class__.__name__}")
+        base_model.init_from_rwkv_scheme_(verbose=True, strict=True)
+
         lit = LitRWKV(
             core=base_model,
             args=args,

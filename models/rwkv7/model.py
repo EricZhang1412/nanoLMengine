@@ -3,6 +3,7 @@
 ########################################################################################################
 
 import os, math, gc, importlib, sys
+import re
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -337,6 +338,134 @@ class RWKV7Model(nn.Module):
         x = self.ln_out(x)
         x = self.head(x)
         return x
+
+    @torch.no_grad()
+    def generate_init_weight(self, verbose: bool = True) -> dict:
+        
+        rank_zero_info("""Init model weight (slow for large models)...""")
+
+        def _get_layer_id_from_name(n: str) -> int | None:
+            m = re.search(r"\bblocks\.(\d+)\b", n)
+            return int(m.group(1)) if m else None
+
+        m = {}
+        n_params = 0
+        sd = self.state_dict()
+
+        float_mode = os.environ.get("RWKV_FLOAT_MODE", "bf16").lower()  # "fp16" / "bf16" / ""(fp32)
+        use_cuda_alloc = (os.environ.get("RWKV_ACCELERATOR", "CPU").upper() == "GPU") and torch.cuda.is_available()
+        for n, p in sd.items():
+            shape = p.shape
+            if verbose and (not hasattr(self, "trainer") or self.trainer.is_global_zero):
+                s0 = str(shape[0]) if len(shape) > 0 else ""
+                s1 = str(shape[1]) if len(shape) > 1 else ""
+                s2 = str(shape[2]) if len(shape) > 2 else ""
+                s3 = str(shape[3]) if len(shape) > 3 else ""
+                print(f"{s0.ljust(5)} {s1.ljust(5)} {s2.ljust(5)} {s3.ljust(5)} {n}", end="")
+            scale = 1.0
+
+            if (
+                ("ln_" in n) or (".ln" in n) or ("time_" in n) or ("_mask" in n)
+                or ("pos_emb" in n) or (".mask." in n)
+                or n.endswith("_w") or n.endswith("_w1") or n.endswith("_w2") or n.endswith("_bias")
+                or (".weight" not in n)
+            ):
+                if "ln_x.weight" in n:
+                    # layer_scale = (1 + layer_id) / n_layer
+                    layer_id = _get_layer_id_from_name(n)
+                    if layer_id is None:
+                        m[n] = (p * 0.0) + 1.0
+                    else:
+                        layer_scale = (1 + layer_id) / float(self.args.n_layer)
+                        m[n] = (p * 0.0) + (layer_scale ** 0.7)
+                else:
+                    m[n] = p
+                if verbose:
+                    print()
+            elif n == "emb.weight":
+                m[n] = p.clone()
+                scale = -1e-4
+                nn.init.uniform_(m[n], a=scale, b=-scale)
+                if verbose:
+                    print(f" [scale {scale}]")
+            elif n == "head.weight":
+                m[n] = p.clone()
+                if self.args.vocab_size > self.args.n_embed:
+                    scale = 0.5 * math.sqrt(self.args.vocab_size / self.args.n_embed)
+                else:
+                    scale = 0.5
+                nn.init.orthogonal_(m[n], gain=scale)
+                if verbose:
+                    print(f" [scale {scale}]")
+            else:
+                assert n.endswith(".weight"), f"Unexpected param name (not .weight): {n}"
+
+                zero = [
+                    ".att.output.",
+                    ".ffn.value.",
+                    ".ffn.receptance.",
+                    ".ffnPre.value.",
+                    ".ffnPre.receptance.",
+                    "head_q.",
+                    ".oo.",
+                    ".rr.",
+                ]
+                for kk in zero:
+                    if kk in n:
+                        scale = 0.0
+
+                for kk in [".att.key."]:
+                    if kk in n:
+                        scale = 0.1
+                for kk in [".att.gate."]:
+                    if kk in n:
+                        scale = 0.1
+
+                if verbose:
+                    rank_zero_info(f" [scale {scale}]")
+
+                if len(shape) != 2:
+                    m[n] = p.clone()
+                else:
+                    if use_cuda_alloc:
+                        w = torch.empty((shape[0], shape[1]), device="cuda", dtype=torch.float32)
+                    else:
+                        w = torch.empty((shape[0], shape[1]), device="cpu", dtype=torch.float32)
+
+                    if scale == 0.0:
+                        nn.init.zeros_(w)
+                    elif scale < 0:
+                        nn.init.uniform_(w, a=scale, b=-scale)
+                    else:
+                        nn.init.orthogonal_(w, gain=scale)
+
+                    m[n] = w
+
+            m[n] = m[n].detach().cpu()
+            if float_mode == "fp16":
+                m[n] = m[n].half()
+            elif float_mode == "bf16":
+                m[n] = m[n].bfloat16()
+
+            n_params += m[n].numel()
+
+        
+        rank_zero_info(f"model params {n_params}")
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        return m
+
+    @torch.no_grad()
+    def init_from_rwkv_scheme_(self, verbose: bool = True, strict: bool = True):
+        init_sd = self.generate_init_weight(verbose=verbose)
+        missing, unexpected = self.load_state_dict(init_sd, strict=strict)
+        if verbose and (missing or unexpected):
+            print("missing keys:", missing)
+            print("unexpected keys:", unexpected)
+        return self
 
 class LitRWKV(L.LightningModule):
     def __init__(self, core: nn.Module, args, optimizer_config=None, train_config=None):
