@@ -2,5 +2,5 @@ name: rwkv_trie
 vocab_file: /data/maluzhang-folder/zhangjy/projects/nanoLMengine/utils/tokenizer/rwkv_tokenizer/rwkv_vocab_v20230424.txt
 use_fast: true
 padding_side: right
-max_seq_len: 2048
+max_seq_len: 4096
 truncation: true

@@ -1,5 +1,5 @@
 name: rwkv7
 jit_on: true
 head_size: 64
-n_embed: 768
-n_layer: 6
+n_embed: 1024
+n_layer: 12

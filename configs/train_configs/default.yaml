@@ -1,9 +1,9 @@
 trainer:
-  strategy: auto
+  strategy: ddp_find_unused_parameters_true
   precision: bf16-mixed
   max_epochs: 10
   gradient_clip_val: 0.0
-  log_every_n_steps: 100
+  log_every_n_steps: 1
   check_val_every_n_epoch: 1
   val_check_interval: 1
   enable_checkpointing: true
@@ -11,8 +11,7 @@ trainer:
 random_seed: 42
 gradient_clip_val: 0.0
 num_sanity_val_steps: 0
-log_every_n_steps: 100
-max_epochs: 10
+max_epochs: 4
 
-batch_size_per_gpu: 16
-epoch_steps: 10
+batch_size_per_gpu: 4
+epoch_steps: 8
