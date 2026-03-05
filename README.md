@@ -12,7 +12,7 @@ The whole project is based on uv. Make sure you have uv installed.
 ``` shell
 pip install uv
 ```
-Create 3rdparty folder and clone the [`flash-linear-attention`](https://github.com/fla-org/flash-linear-attention.git),  [`lm-evaluation-harness`](https://github.com/EleutherAI/lm-evaluation-harness.git) and [`flame`](https://github.com/fla-org/flame.git) repository.
+Create 3rdparty folder and clone the [`lm-evaluation-harness`](https://github.com/EleutherAI/lm-evaluation-harness.git) repository.
 ``` shell
 mkdir 3rdparty
 cd 3rdparty
