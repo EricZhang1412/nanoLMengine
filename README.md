@@ -30,7 +30,8 @@ For more usage of uv, you can refer to [uv](https://docs.astral.sh/uv/).
 ### 2. Run the training script
 
 ``` shell
-uv run bash train.sh
+uv run bash train.sh # single gpu
+uv run bash multigpu_train.sh # multi gpu
 ```
 
 ### 3. logging
