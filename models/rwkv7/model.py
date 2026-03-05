@@ -503,7 +503,6 @@ class LitRWKV(L.LightningModule):
         args = self.args
         lr = float(getattr(self.optimizer_config, "lr", getattr(args, "lr_init", 3e-4)))
         b1, b2 = float(getattr(self.optimizer_config, "beta1", getattr(args, "beta1", 0.9))), float(getattr(self.optimizer_config, "beta2", getattr(args, "beta2", 0.95)))
-        # betas = getattr(self.optimizer_config, "betas", getattr(args, "betas", (0.9, 0.95)))
         betas = (b1, b2)
         adam_eps = float(getattr(self.optimizer_config, "adam_eps", getattr(args, "adam_eps", 1e-8)))
         weight_decay = float(getattr(self.optimizer_config, "weight_decay", getattr(args, "weight_decay", 0.0)))
