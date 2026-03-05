@@ -3,3 +3,4 @@ path: /data/maluzhang-folder/datasets/fineweb-edu/
 sample: 100BT
 text_column: "text"
 dataset_split: "train"
+aim_log_dir: ./aim_log

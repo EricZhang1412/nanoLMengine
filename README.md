@@ -32,3 +32,17 @@ For more usage of uv, you can refer to [uv](https://docs.astral.sh/uv/).
 ``` shell
 uv run bash train.sh
 ```
+
+### 3. logging
+The training process will be logged in the `./aim_log` folder. You can use `aim up` to visualize the logging.
+``` shell
+cd ./aim_log
+aim up
+```
+Outputs are like:
+``` shell
+Running Aim UI on repo `<Repo#-{HASH_ID} path={AIM_PATH} read_only=None>`
+Open http://127.0.0.1:43800
+Press Ctrl+C to exit
+```
+> Note: You can manually set the `aim_log_dir` in the `default_project_configs.yaml` file.

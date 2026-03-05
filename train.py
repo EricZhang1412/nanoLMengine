@@ -87,7 +87,7 @@ def train(args):
     optimizer_config = load_config(args.optimizer_config)
 
     exp_name = f"{model_config.name}_{tokenizer_config.name}_seqlen.{tokenizer_config.max_seq_len}_bsz.{train_config.batch_size_per_gpu * train_config.epoch_steps}_lr.{optimizer_config.lr}_schedule.{optimizer_config.scheduler}_warmup.{optimizer_config.warmup_steps}"
-    aim_logger = AimLogger(repo='./aim_log', experiment=exp_name)
+    aim_logger = AimLogger(repo=project_config.aim_log_dir, experiment=exp_name)
 
     # seed
     if train_config.random_seed >= 0:
