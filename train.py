@@ -7,6 +7,7 @@ import lightning as L
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.utilities.rank_zero import rank_zero_info
 from lightning.pytorch.strategies import FSDPStrategy
+from aim.pytorch_lightning import AimLogger
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.utils.data import DataLoader
 
@@ -84,6 +85,9 @@ def train(args):
     train_config = load_config(args.train_config)
     model_config = load_config(args.model_config)
     optimizer_config = load_config(args.optimizer_config)
+
+    exp_name = f"{model_config.name}_{tokenizer_config.name}_seqlen.{tokenizer_config.max_seq_len}_bsz.{train_config.batch_size_per_gpu * train_config.epoch_steps}_lr.{optimizer_config.lr}_schedule.{optimizer_config.scheduler}_warmup.{optimizer_config.warmup_steps}"
+    aim_logger = AimLogger(repo='./aim_log', experiment=exp_name)
 
     # seed
     if train_config.random_seed >= 0:
@@ -172,7 +176,7 @@ def train(args):
     max_id = max(tokenizer.trie_tokenizer.idx2token.keys())
     rank_zero_info(f"max_id in vocab: {max_id}")
 
-    trainer = Trainer(**trainer_kwargs)
+    trainer = Trainer(**trainer_kwargs, logger=aim_logger)
     trainer.fit(model, datamodule=datamodule)
 
 if __name__ == "__main__":
