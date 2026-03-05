@@ -7,9 +7,11 @@ trainer:
   check_val_every_n_epoch: 1
   val_check_interval: 1
   enable_checkpointing: true
+  accumulate_grad_batches: 8
 
 random_seed: 42
 num_sanity_val_steps: 0
 
 batch_size_per_gpu: 4
-epoch_steps: 8
+# limit_train_batches: 6103515625
+limit_train_batches: null

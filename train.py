@@ -7,6 +7,7 @@ import lightning as L
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.utilities.rank_zero import rank_zero_info
 from lightning.pytorch.strategies import FSDPStrategy
+from lightning.pytorch.callbacks import LearningRateMonitor
 from aim.pytorch_lightning import AimLogger
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.utils.data import DataLoader
@@ -14,6 +15,7 @@ from torch.utils.data import DataLoader
 from utils.load_config import load_config
 from utils.hf_dataset import load_project_dataset, HFDataset  # 你原来的函数（里面调用 load_dataset）
 from utils.tokenizer.base import build_tokenizer
+from utils.count_token import TokenCountCallback
 from models.build_model import build_model
 from models.transformer.model import TransformerBlock
 
@@ -86,7 +88,7 @@ def train(args):
     model_config = load_config(args.model_config)
     optimizer_config = load_config(args.optimizer_config)
 
-    exp_name = f"{model_config.name}_{tokenizer_config.name}_seqlen.{tokenizer_config.max_seq_len}_bsz.{train_config.batch_size_per_gpu * train_config.epoch_steps}_lr.{optimizer_config.lr}_schedule.{optimizer_config.scheduler}_warmup.{optimizer_config.warmup_steps}"
+    exp_name = f"{model_config.name}_{tokenizer_config.name}_seqlen.{tokenizer_config.max_seq_len}_bsz.{train_config.batch_size_per_gpu}_lr.{optimizer_config.lr}_schedule.{optimizer_config.scheduler}_warmup.{optimizer_config.warmup_steps}"
     aim_logger = AimLogger(repo=project_config.aim_log_dir, experiment=exp_name)
 
     # seed
@@ -99,13 +101,23 @@ def train(args):
     np.set_printoptions(precision=8, suppress=True, linewidth=200)
 
     timestamp = datetime.datetime.today().strftime("%Y-%m-%d-%H-%M-%S")
-    real_bsz = int(os.environ.get("GPU_PER_NODE", "1")) * int(os.environ.get("N_NODE", "1")) * train_config.batch_size_per_gpu
-    samples_per_epoch = train_config.epoch_steps * real_bsz
-    tokens_per_epoch = samples_per_epoch * tokenizer_config.max_seq_len
+    gpus_per_node = int(os.environ.get("GPU_PER_NODE", "1"))
+    num_nodes = int(os.environ.get("N_NODE", "1"))
+    world_size = gpus_per_node * num_nodes
+    micro_bsz_per_gpu = int(train_config.batch_size_per_gpu)
+    accumulate = int(getattr(train_config.trainer, "accumulate_grad_batches", 1))
+    effective_bsz_global = world_size * micro_bsz_per_gpu * accumulate
+    # --- token stats --- # 
+    seq_len = int(tokenizer_config.max_seq_len)
+    tokens_per_update = effective_bsz_global * seq_len
+    max_updates = int(getattr(train_config, "max_steps", 0) or 0)
+    tokens_total_planned = tokens_per_update * max_updates if max_updates > 0 else None
     rank_zero_info(f"run_id: {timestamp}")
-    rank_zero_info(f"real_bsz: {real_bsz}")
-    rank_zero_info(f"samples_per_epoch: {samples_per_epoch}")
-    rank_zero_info(f"tokens_per_epoch: {tokens_per_epoch}")
+    rank_zero_info(f"world_size: {world_size}")
+    rank_zero_info(f"effective_bsz_global: {effective_bsz_global}")
+    rank_zero_info(f"tokens_per_update: {tokens_per_update}")
+    rank_zero_info(f"max_updates: {max_updates}")
+    rank_zero_info(f"tokens_total_planned: {tokens_total_planned}")
 
     # cudnn / tf32
     torch.backends.cudnn.benchmark = True
@@ -141,7 +153,14 @@ def train(args):
         check_val_every_n_epoch=train_config.trainer.check_val_every_n_epoch,
         val_check_interval=train_config.trainer.val_check_interval,
         enable_checkpointing=train_config.trainer.enable_checkpointing,
+        accumulate_grad_batches=train_config.trainer.accumulate_grad_batches,
+        limit_train_batches=train_config.limit_train_batches,
     )
+
+    callbacks = [
+        LearningRateMonitor(logging_interval="step"),
+        TokenCountCallback(log_every_n_updates=train_config.trainer.log_every_n_steps),
+    ]
 
     tokenizer = build_tokenizer(tokenizer_config)
     tokenizer.add_bos_token = False
@@ -176,7 +195,7 @@ def train(args):
     max_id = max(tokenizer.trie_tokenizer.idx2token.keys())
     rank_zero_info(f"max_id in vocab: {max_id}")
 
-    trainer = Trainer(**trainer_kwargs, logger=aim_logger)
+    trainer = Trainer(**trainer_kwargs, logger=aim_logger, callbacks=callbacks)
     trainer.fit(model, datamodule=datamodule)
 
 if __name__ == "__main__":
