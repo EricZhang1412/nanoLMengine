@@ -497,7 +497,23 @@ class LitRWKV(L.LightningModule):
             reduction="mean",
         )
         self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+        # add other monitors 
+        # lr
+        lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+        self.log("train/lr", lr, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+
         return L2Wrap.apply(loss, logits)
+
+    # grad_norm
+    def on_before_optimizer_step(self, optimizer):
+        total_norm = torch.norm(
+            torch.stack([
+                p.grad.detach().norm()
+                for p in self.parameters()
+                if p.grad is not None
+            ])
+        )
+        self.log("train/grad_norm", total_norm, on_step=True, sync_dist=True)
 
     def configure_optimizers(self):
         args = self.args
