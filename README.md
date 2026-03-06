@@ -5,7 +5,7 @@ This is a customed engine repo for pretraining LMs.
 # TODO List
 - [x] Add multi-gpu training script
 - [x] Add logging based on aimstack engine
-- [ ] Add resume training scheme
+- [x] Add resume training scheme
 - [ ] Fix the cosine scheduler issue of epoch/steps issue
 - [ ] Add evaluation script based on lm-evaluation-harness
 
