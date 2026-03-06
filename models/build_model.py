@@ -14,6 +14,7 @@ from lightning.pytorch.utilities.rank_zero import rank_zero_info
 
 from .transformer.model import TransformerLM
 from .rwkv7.model import RWKV7Model, LitRWKV, RWKV7Block
+from .linear_attn.model import LinearAttentionLM
 
 class LitLM(L.LightningModule):
     def __init__(
@@ -49,7 +50,8 @@ class LitLM(L.LightningModule):
 
     def configure_optimizers(self):
         lr = float(getattr(self.optimizer_config, "lr", 3e-4))
-        betas = getattr(self.optimizer_config, "betas", (0.9, 0.95))
+        b1, b2 = float(getattr(self.optimizer_config, "beta1", 0.9)), float(getattr(self.optimizer_config, "beta2", 0.95))
+        betas = (b1, b2)
         weight_decay = float(getattr(self.optimizer_config, "weight_decay", 0.1))
 
         optimizer = torch.optim.AdamW(
@@ -64,7 +66,9 @@ class LitLM(L.LightningModule):
             return optimizer
 
         if sched_name == "cosine":
-            max_steps = int(getattr(self.train_config, "max_steps", 0) or 0)
+            max_steps = self.trainer.estimated_stepping_batches
+            warmup_steps = int(getattr(self.optimizer_config, "warmup_steps", 0))
+            min_lr_ratio = float(getattr(self.optimizer_config, "min_lr_ratio", 0.1))
             if max_steps <= 0:
                 rank_zero_info("scheduler=cosine but max_steps not set; return optimizer only.")
                 return optimizer
@@ -72,12 +76,14 @@ class LitLM(L.LightningModule):
             warmup_steps = int(getattr(self.optimizer_config, "warmup_steps", 0) or 0)
 
             def lr_lambda(step: int):
-                if step < warmup_steps and warmup_steps > 0:
+                # ----- warmup -----
+                if step < warmup_steps:
                     return float(step) / float(max(1, warmup_steps))
-                # cosine decay
-                progress = float(step - warmup_steps) / float(max(1, max_steps - warmup_steps))
+                # ----- cosine decay -----
+                progress = (step - warmup_steps) / float(max(1, max_steps - warmup_steps))
                 progress = min(max(progress, 0.0), 1.0)
-                return 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.1415926535))).item()
+                cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+                return min_lr_ratio + (1 - min_lr_ratio) * cosine
 
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
             return {
@@ -143,5 +149,37 @@ def build_model(
         )
         return lit
 
+    elif model_config.name == "linear_attn_naive": 
+        model = LinearAttentionLM(
+            vocab_size=tokenizer.vocab_size,
+            ctx_len=tokenizer_config.max_seq_len,
+            d_model=model_config.d_model,
+            n_layer=model_config.n_layer,
+            n_head=model_config.n_head,
+            dropout=model_config.dropout,
+            attn_expand_k=model_config.attn_expand_k,
+            attn_expand_v=model_config.attn_expand_v,
+            attn_feature_map=model_config.attn_feature_map,
+            attn_output_norm=model_config.attn_output_norm,
+            attn_norm_q=model_config.attn_norm_q,
+            attn_norm_k=model_config.attn_norm_k,
+            attn_norm_eps=model_config.attn_norm_eps,
+            mlp_intermediate_size=model_config.mlp_intermediate_size,
+            mlp_reduce_output=model_config.mlp_reduce_output,
+            mlp_act_fun=model_config.mlp_act_fun,
+            mlp_norm_type=model_config.mlp_norm_type,
+            mlp_norm_eps=model_config.mlp_norm_eps,
+        )
+        rank_zero_info(f"Model core: {model.__class__.__name__}")
+        rank_zero_info(f"vocab_size={vocab_size}, d_model={d_model}")
+
+        lit_model = LitLM(
+            model=model,
+            optimizer_config=optimizer_config,
+            train_config=train_config,
+            tokenizer=tokenizer,
+        )
+        return lit_model
+    
     else: 
         raise ValueError(f"Unknown model: {model_config.name}")

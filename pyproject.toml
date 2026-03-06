@@ -42,6 +42,7 @@ dependencies = [
     "ninja",
     "aim",
     "omegaconf",
+    "tilelang",
 ]
 
 [[tool.uv.index]]

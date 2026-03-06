@@ -240,8 +240,16 @@ def train(args):
 
     trainer = Trainer(**trainer_kwargs, logger=aim_logger, callbacks=callbacks)
 
-    save_aim_run_hash(ckpt_dir, aim_logger.experiment.hash)
-    rank_zero_info(f"Aim run hash: {aim_logger.experiment.hash}")
+    # save_aim_run_hash(ckpt_dir, aim_logger.experiment.hash)
+    try:
+        run_hash = get_aim_run_hash(aim_logger)
+        if run_hash is not None:
+            save_aim_run_hash(ckpt_dir, run_hash)
+        else:
+            rank_zero_info("[WARN] Aim run hash unavailable, skip saving.")
+    except Exception as e:
+        rank_zero_info(f"[WARN] Failed to save Aim run hash: {e}")
+    # rank_zero_info(f"Aim run hash: {aim_logger.experiment.hash}")
 
     ckpt_path = resolve_resume_ckpt(args.resume, ckpt_dir)
     if ckpt_path is not None:

@@ -1,0 +1,17 @@
+name: linear_attn_naive
+d_model: 1024
+n_layer: 16
+n_head: 8
+dropout: 0.1
+attn_expand_k: 1
+attn_expand_v: 1
+attn_feature_map: identity
+attn_output_norm: rmsnorm
+attn_norm_q: false
+attn_norm_k: false
+attn_norm_eps: 1e-5
+mlp_intermediate_size: 1024
+mlp_reduce_output: true
+mlp_act_fun: swiglu
+mlp_norm_type: layernorm
+mlp_norm_eps: 1e-5
