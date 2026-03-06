@@ -4,10 +4,15 @@ import numpy as np
 import torch
 import functools
 import lightning as L
+from pathlib import Path
+from types import SimpleNamespace
+from argparse import Namespace
+from omegaconf import DictConfig, ListConfig
+import torch.serialization
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.utilities.rank_zero import rank_zero_info
 from lightning.pytorch.strategies import FSDPStrategy
-from lightning.pytorch.callbacks import LearningRateMonitor
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, OnExceptionCheckpoint
 from aim.pytorch_lightning import AimLogger
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.utils.data import DataLoader
@@ -16,6 +21,7 @@ from utils.load_config import load_config
 from utils.hf_dataset import load_project_dataset, HFDataset  # 你原来的函数（里面调用 load_dataset）
 from utils.tokenizer.base import build_tokenizer
 from utils.count_token import TokenCountCallback
+from utils.resume import resolve_resume_ckpt, load_aim_run_hash, save_aim_run_hash
 from models.build_model import build_model
 from models.transformer.model import TransformerBlock
 
@@ -30,6 +36,18 @@ def parser_args():
     parser.add_argument("--train_config", type=str, required=True)
     parser.add_argument("--model_config", type=str, required=True)
     parser.add_argument("--optimizer_config", type=str, required=True)
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default="auto",
+        help="auto / none / /path/to/xxx.ckpt"
+    )
+    parser.add_argument(
+        "--ckpt_dir",
+        type=str,
+        default=None,
+        help="checkpoint save dir; default: <project_config.output_dir or ./outputs>/checkpoints/<exp_name>"
+    )
     return parser.parse_args()
 
 class ProjectDataModule(L.LightningDataModule):
@@ -82,6 +100,12 @@ class ProjectDataModule(L.LightningDataModule):
 def train(args):
     rank_zero_info("########## training in progress ##########")
 
+    torch.serialization.add_safe_globals([
+        SimpleNamespace,
+        Namespace,
+        DictConfig,
+        ListConfig,
+    ])
     project_config = load_config(args.project_config)
     tokenizer_config = load_config(args.tokenizer_config)
     train_config = load_config(args.train_config)
@@ -89,7 +113,7 @@ def train(args):
     optimizer_config = load_config(args.optimizer_config)
 
     exp_name = f"{model_config.name}_{tokenizer_config.name}_seqlen.{tokenizer_config.max_seq_len}_bsz.{train_config.batch_size_per_gpu}_lr.{optimizer_config.lr}_schedule.{optimizer_config.scheduler}_warmup.{optimizer_config.warmup_steps}"
-    aim_logger = AimLogger(repo=project_config.aim_log_dir, experiment=exp_name)
+    # aim_logger = AimLogger(repo=project_config.aim_log_dir, experiment=exp_name)
 
     # seed
     if train_config.random_seed >= 0:
@@ -140,7 +164,16 @@ def train(args):
             activation_checkpointing=TransformerBlock,  # 省显存，建议开
             use_orig_params=True,  # 对 weight tying 更友好（如你的 torch 版本支持）
         )
-
+    
+    default_root_dir = getattr(project_config, "output_dir", "./outputs")
+    ckpt_dir = args.ckpt_dir or os.path.join(default_root_dir, "checkpoints", exp_name)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    aim_run_hash = load_aim_run_hash(ckpt_dir) if args.resume != "none" else None
+    aim_logger = AimLogger(
+        repo=project_config.aim_log_dir,
+        experiment=exp_name,
+        run_hash=aim_run_hash,
+    )
     # Trainer kwargs（Lightning 2.6.1）
     trainer_kwargs = dict(
         strategy=trainer_strategy,     # "deepspeed_stage_2" / "ddp" 
@@ -156,10 +189,20 @@ def train(args):
         accumulate_grad_batches=train_config.trainer.accumulate_grad_batches,
         limit_train_batches=train_config.limit_train_batches,
     )
+    save_every_n_train_steps = int(getattr(train_config.trainer, "save_every_n_train_steps", 1000))
+
 
     callbacks = [
         LearningRateMonitor(logging_interval="step"),
         TokenCountCallback(log_every_n_updates=train_config.trainer.log_every_n_steps),
+        ModelCheckpoint(
+            dirpath=ckpt_dir,
+            filename="{step:09d}",
+            save_top_k=-1, 
+            save_last=True, 
+            every_n_train_steps=save_every_n_train_steps, 
+            save_on_train_epoch_end=False
+        ),
     ]
 
     tokenizer = build_tokenizer(tokenizer_config)
@@ -196,7 +239,18 @@ def train(args):
     rank_zero_info(f"max_id in vocab: {max_id}")
 
     trainer = Trainer(**trainer_kwargs, logger=aim_logger, callbacks=callbacks)
-    trainer.fit(model, datamodule=datamodule)
+
+    save_aim_run_hash(ckpt_dir, aim_logger.experiment.hash)
+    rank_zero_info(f"Aim run hash: {aim_logger.experiment.hash}")
+
+    ckpt_path = resolve_resume_ckpt(args.resume, ckpt_dir)
+    if ckpt_path is not None:
+        rank_zero_info(f"Resuming from checkpoint: {ckpt_path}")
+    else:
+        rank_zero_info("Training from scratch (no checkpoint found).")
+    
+
+    trainer.fit(model, datamodule=datamodule, ckpt_path=ckpt_path)
 
 if __name__ == "__main__":
     args = parser_args()

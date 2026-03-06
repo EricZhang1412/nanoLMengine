@@ -14,6 +14,7 @@ pretrained/
 3rdparty/
 profiler_logs/
 lightning_logs/
+outputs/
 
 .aim/
 aim_log/

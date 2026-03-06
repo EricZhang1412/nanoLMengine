@@ -41,6 +41,7 @@ dependencies = [
     "wandb",
     "ninja",
     "aim",
+    "omegaconf",
 ]
 
 [[tool.uv.index]]

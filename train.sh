@@ -47,3 +47,4 @@ torchrun \
     --train_config configs/train_configs/default.yaml \
     --model_config configs/model_configs/rwkv7_base.yaml \
     --optimizer_config configs/optimizer_configs/lr_3e-4_adam_cosine_warmp1000.yaml \
+    --resume auto
