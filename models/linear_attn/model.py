@@ -83,7 +83,7 @@ class LinearAttentionBlock(nn.Module):
 class LinearAttentionLM(nn.Module):
     def __init__(
         self,
-        vocab_size: int = 32000,
+        vocab_size: int = 65530,
         ctx_len: int = 1024,
         d_model: int = 1024,
         n_layer: int = 12,
@@ -127,6 +127,20 @@ class LinearAttentionLM(nn.Module):
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         self.dropout = nn.Dropout(dropout)
         self.lm_head.weight = self.emb.weight
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.trunc_normal_(module.weight, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.trunc_normal_(module.weight, std=0.02)
+        elif isinstance(module, (nn.LayerNorm, nn.RMSNorm, RMSNorm, LayerNorm)):
+            if hasattr(module, "weight") and module.weight is not None:
+                nn.init.ones_(module.weight)
+            if hasattr(module, "bias") and module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         B, T = input_ids.shape

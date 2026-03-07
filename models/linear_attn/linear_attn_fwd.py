@@ -88,7 +88,7 @@ def tl_fused_chunk_fwd_kernel(
 def tl_fused_chunk_fwd(q, k, v):
     B, S, H, D = q.shape
     kernel = tl_fused_chunk_fwd_kernel(B, S, H, D, D)
-    # print(kernel.get_kernel_source())
+    
     o = torch.zeros((B, S, H, D), device="cuda", dtype=torch.float32)
     h = kernel(q, k, v, o)
     return o, h

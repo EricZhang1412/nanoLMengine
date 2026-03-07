@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-
+import os, math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,8 +13,24 @@ import lightning as L
 from lightning.pytorch.utilities.rank_zero import rank_zero_info
 
 from .transformer.model import TransformerLM
-from .rwkv7.model import RWKV7Model, LitRWKV, RWKV7Block
+# from .rwkv7.model import RWKV7Model, LitRWKV, RWKV7Block
 from .linear_attn.model import LinearAttentionLM
+
+class L2Wrap(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, loss, y):
+        ctx.save_for_backward(y)
+        return loss
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        y = ctx.saved_tensors[0]
+        # to encourage the logits to be close to 0
+        factor = 1e-4 / (y.shape[0] * y.shape[1])
+        maxx, ids = torch.max(y, -1, keepdim=True)
+        gy = torch.zeros_like(y)
+        gy.scatter_(-1, ids, maxx * factor)
+        return (grad_output, gy)
 
 class LitLM(L.LightningModule):
     def __init__(
@@ -38,15 +54,16 @@ class LitLM(L.LightningModule):
         x, y = batch
         logits = self(x)  # [B,T,V]
 
-        # CrossEntropy 需要 [N,V] vs [N]
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
             y.reshape(-1),
             reduction="mean",
         )
-
+        lr = self.trainer.optimizers[0].param_groups[0]["lr"]
         self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+        self.log("train/lr", lr, prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
         return loss
+        # return L2Wrap.apply(loss, logits)
 
     def configure_optimizers(self):
         lr = float(getattr(self.optimizer_config, "lr", 3e-4))
@@ -66,7 +83,7 @@ class LitLM(L.LightningModule):
             return optimizer
 
         if sched_name == "cosine":
-            max_steps = self.trainer.estimated_stepping_batches
+            max_steps = int(getattr(self.train_config, "max_steps", 0))
             warmup_steps = int(getattr(self.optimizer_config, "warmup_steps", 0))
             min_lr_ratio = float(getattr(self.optimizer_config, "min_lr_ratio", 0.1))
             if max_steps <= 0:
@@ -133,21 +150,21 @@ def build_model(
         )
         return lit_model
 
-    elif model_config.name == "rwkv7": 
-        args = model_config
-        args.vocab_size = tokenizer.vocab_size
-        args.ctx_len = tokenizer_config.max_seq_len
-        base_model = RWKV7Model(args=args, BlockCls=RWKV7Block)
-        rank_zero_info(f"Base Model: {base_model.__class__.__name__}")
-        base_model.init_from_rwkv_scheme_(verbose=True, strict=True)
+    # elif model_config.name == "rwkv7": 
+    #     args = model_config
+    #     args.vocab_size = tokenizer.vocab_size
+    #     args.ctx_len = tokenizer_config.max_seq_len
+    #     base_model = RWKV7Model(args=args, BlockCls=RWKV7Block)
+    #     rank_zero_info(f"Base Model: {base_model.__class__.__name__}")
+    #     base_model.init_from_rwkv_scheme_(verbose=True, strict=True)
 
-        lit = LitRWKV(
-            core=base_model,
-            args=args,
-            optimizer_config=optimizer_config,
-            train_config=train_config,
-        )
-        return lit
+    #     lit = LitRWKV(
+    #         core=base_model,
+    #         args=args,
+    #         optimizer_config=optimizer_config,
+    #         train_config=train_config,
+    #     )
+    #     return lit
 
     elif model_config.name == "linear_attn_naive": 
         model = LinearAttentionLM(

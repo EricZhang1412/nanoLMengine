@@ -82,6 +82,11 @@ class LinearAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
+        if self.norm_q:
+            self.q_norm = RMSNorm(self.head_k_dim, eps=norm_eps, elementwise_affine=True)
+        if self.norm_k:
+            self.k_norm = RMSNorm(self.head_k_dim, eps=norm_eps, elementwise_affine=True)
+
         if output_norm == "rmsnorm":
             self.norm = RMSNorm(self.head_v_dim, eps=norm_eps, elementwise_affine=True)
         elif output_norm == "identity":
@@ -123,9 +128,10 @@ class LinearAttention(nn.Module):
         k = self._feature_map_k(k)
 
         if self.norm_q:
-            q = q / (q.sum(dim=-1, keepdim=True) + 1e-4)
+            q = self.q_norm(q)
         if self.norm_k:
-            k = k / (k.sum(dim=-1, keepdim=True) + 1e-4)
+            k = self.k_norm(k)
+
 
         o = fused_chunk_linear_attn(
             q.contiguous(),
