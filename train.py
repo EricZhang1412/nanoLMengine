@@ -171,12 +171,7 @@ def train(args):
     default_root_dir = getattr(project_config, "output_dir", "./outputs")
     ckpt_dir = args.ckpt_dir or os.path.join(default_root_dir, "checkpoints", exp_name)
     os.makedirs(ckpt_dir, exist_ok=True)
-    # aim_run_hash = load_aim_run_hash(ckpt_dir) if args.resume != "none" else None
-    # aim_logger = AimLogger(
-    #     repo=project_config.aim_log_dir,
-    #     experiment=exp_name,
-    #     run_hash=aim_run_hash,
-    # )
+    
     if is_global_zero_env():
         aim_run_hash = load_aim_run_hash(ckpt_dir) if args.resume != "none" else None
         aim_logger = AimLogger(
