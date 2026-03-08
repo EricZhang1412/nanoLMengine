@@ -17,7 +17,7 @@ MASTER_PORT=${MASTER_PORT:-29502}
 echo "NODE_RANK: ${NODE_RANK}, MASTER_ADDR: ${MASTER_ADDR}, MASTER_PORT: ${MASTER_PORT}"
 
 N_NODE=${N_NODE:-1}
-GPU_PER_NODE=${GPU_PER_NODE:-8}
+GPU_PER_NODE=${GPU_PER_NODE:-4}
 
 export N_NODE=${N_NODE}
 export GPU_PER_NODE=${GPU_PER_NODE}
@@ -31,7 +31,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 #### Special PATH vars for RWKV7
 export RWKV_JIT_ON=1
-export MAX_JOBS=${MAX_JOBS:-8} # ninja workers for jit
+export MAX_JOBS=${MAX_JOBS:-4} # ninja workers for jit
 # export TORCH_CUDA_ARCH_LIST="9.0"
 export CUDA_LAUNCH_BLOCKING=1
 
@@ -45,6 +45,6 @@ torchrun \
     --project_config configs/default_project_configs.yaml \
     --tokenizer_config configs/tokenizer_configs/rwkv.yaml \
     --train_config configs/train_configs/default.yaml \
-    --model_config configs/model_configs/rwkv7_base.yaml \
+    --model_config configs/model_configs/linear_attn_naive_base.yaml \
     --optimizer_config configs/optimizer_configs/lr_3e-4_adam_cosine_warmp1000.yaml \
     --resume auto

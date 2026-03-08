@@ -1,8 +1,8 @@
-lr: 2e-3
+lr: 3e-4
 beta1: 0.9
-beta2: 0.999
+beta2: 0.95
 adam_eps: 1e-8
 weight_decay: 0.0
 scheduler: cosine
-warmup_steps: 1000
+warmup_steps: 300
 min_lr_ratio: 0.1

@@ -65,6 +65,16 @@ class LitLM(L.LightningModule):
         return loss
         # return L2Wrap.apply(loss, logits)
 
+    def on_before_optimizer_step(self, optimizer):
+        total_norm = torch.norm(
+            torch.stack([
+                p.grad.detach().norm()
+                for p in self.parameters()
+                if p.grad is not None
+            ])
+        )
+        self.log("train/grad_norm", total_norm, on_step=True, sync_dist=True)
+
     def configure_optimizers(self):
         lr = float(getattr(self.optimizer_config, "lr", 3e-4))
         b1, b2 = float(getattr(self.optimizer_config, "beta1", 0.9)), float(getattr(self.optimizer_config, "beta2", 0.95))

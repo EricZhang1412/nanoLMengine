@@ -97,6 +97,9 @@ class ProjectDataModule(L.LightningDataModule):
             drop_last=True,
         )
 
+def is_global_zero_env():
+    return int(os.environ.get("RANK", "0")) == 0
+
 def train(args):
     rank_zero_info("########## training in progress ##########")
 
@@ -168,12 +171,21 @@ def train(args):
     default_root_dir = getattr(project_config, "output_dir", "./outputs")
     ckpt_dir = args.ckpt_dir or os.path.join(default_root_dir, "checkpoints", exp_name)
     os.makedirs(ckpt_dir, exist_ok=True)
-    aim_run_hash = load_aim_run_hash(ckpt_dir) if args.resume != "none" else None
-    aim_logger = AimLogger(
-        repo=project_config.aim_log_dir,
-        experiment=exp_name,
-        run_hash=aim_run_hash,
-    )
+    # aim_run_hash = load_aim_run_hash(ckpt_dir) if args.resume != "none" else None
+    # aim_logger = AimLogger(
+    #     repo=project_config.aim_log_dir,
+    #     experiment=exp_name,
+    #     run_hash=aim_run_hash,
+    # )
+    if is_global_zero_env():
+        aim_run_hash = load_aim_run_hash(ckpt_dir) if args.resume != "none" else None
+        aim_logger = AimLogger(
+            repo=project_config.aim_log_dir,
+            experiment=exp_name,
+            run_hash=aim_run_hash,
+        )
+    else:
+        aim_logger = None
     # Trainer kwargs（Lightning 2.6.1）
     trainer_kwargs = dict(
         strategy=trainer_strategy,     # "deepspeed_stage_2" / "ddp" 
