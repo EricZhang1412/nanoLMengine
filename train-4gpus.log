@@ -1,0 +1,30 @@
+NODE_RANK: 0, MASTER_ADDR: pt-0e70b30b7123466d8c300719f56ab4e1-worker-0, MASTER_PORT: 23456
+N_NODE: 1, GPU_PER_NODE: 4
+┏━━━┳━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name  ┃ Type              ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model │ LinearAttentionLM │  1.7 B │ train │     0 │
+└───┴───────┴───────────────────┴────────┴───────┴───────┘
+Trainable params: 1.7 B                                                         
+Non-trainable params: 0                                                         
+Total params: 1.7 B                                                             
+Total estimated model params size (MB): 7.0 K                                   
+Modules in train mode: 318                                                      
+Modules in eval mode: 0                                                         
+Total FLOPs: 0                                                                  
+2026-03-08 19:30:25  [TileLang:tilelang.jit.kernel:INFO]: TileLang begins to compile kernel `fused_chunk_linear_attn_fwd` with `out_idx=[4]`2026-03-08 19:30:25  [TileLang:tilelang.jit.kernel:INFO]: TileLang begins to compile kernel `fused_chunk_linear_attn_fwd` with `out_idx=[4]`2026-03-08 19:30:25  [TileLang:tilelang.jit.kernel:INFO]: TileLang begins to compile kernel `fused_chunk_linear_attn_fwd` with `out_idx=[4]`2026-03-08 19:30:25  [TileLang:tilelang.jit.kernel:INFO]: TileLang begins to compile kernel `fused_chunk_linear_attn_fwd` with `out_idx=[4]`
+
+
+
+2026-03-08 19:30:31  [TileLang:tilelang.jit.kernel:INFO]: TileLang completes to compile kernel `fused_chunk_linear_attn_fwd`2026-03-08 19:30:31  [TileLang:tilelang.jit.kernel:INFO]: TileLang completes to compile kernel `fused_chunk_linear_attn_fwd`
+
+2026-03-08 19:30:31  [TileLang:tilelang.jit.kernel:INFO]: TileLang completes to compile kernel `fused_chunk_linear_attn_fwd`
+2026-03-08 19:30:31  [TileLang:tilelang.jit.kernel:INFO]: TileLang completes to compile kernel `fused_chunk_linear_attn_fwd`
+2026-03-08 19:30:34  [TileLang:tilelang.jit.kernel:INFO]: TileLang begins to compile kernel `fused_chunk_linear_attn_bwd` with `out_idx=None`
+2026-03-08 19:30:34  [TileLang:tilelang.jit.kernel:INFO]: TileLang begins to compile kernel `fused_chunk_linear_attn_bwd` with `out_idx=None`
+2026-03-08 19:30:34  [TileLang:tilelang.jit.kernel:INFO]: TileLang begins to compile kernel `fused_chunk_linear_attn_bwd` with `out_idx=None`
+2026-03-08 19:30:34  [TileLang:tilelang.jit.kernel:INFO]: TileLang begins to compile kernel `fused_chunk_linear_attn_bwd` with `out_idx=None`
+2026-03-08 19:30:42  [TileLang:tilelang.jit.kernel:INFO]: TileLang completes to compile kernel `fused_chunk_linear_attn_bwd`
+2026-03-08 19:30:42  [TileLang:tilelang.jit.kernel:INFO]: TileLang completes to compile kernel `fused_chunk_linear_attn_bwd`
+2026-03-08 19:30:42  [TileLang:tilelang.jit.kernel:INFO]: TileLang completes to compile kernel `fused_chunk_linear_attn_bwd`
+2026-03-08 19:30:42  [TileLang:tilelang.jit.kernel:INFO]: TileLang completes to compile kernel `fused_chunk_linear_attn_bwd`

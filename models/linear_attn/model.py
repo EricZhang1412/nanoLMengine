@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -30,7 +31,7 @@ class LinearAttentionBlock(nn.Module):
 
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-
+        # ── Pre-norm (attention) ──────────────────────────────
         self.attn_output_norm = attn_output_norm
         if self.attn_output_norm == "rmsnorm":
             self.attn_norm = RMSNorm(hidden_size, eps=attn_norm_eps)
@@ -39,6 +40,7 @@ class LinearAttentionBlock(nn.Module):
         else:
             raise ValueError(f"Unsupported attn_output_norm: {self.attn_output_norm}")
 
+        # ── Pre-norm (MLP) ────────────────────────────────────
         self.mlp_norm_type = mlp_norm_type
         if self.mlp_norm_type == "rmsnorm":
             self.mlp_norm = RMSNorm(hidden_size, eps=mlp_norm_eps)
@@ -126,10 +128,14 @@ class LinearAttentionLM(nn.Module):
         self.ln_out = nn.RMSNorm(d_model, eps=float(mlp_norm_eps))
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         self.dropout = nn.Dropout(dropout)
-        self.lm_head.weight = self.emb.weight
-        self.apply(self._init_weights)
+
+        self.apply(self._init_weights) # basic initialization
+        self._apply_residual_scaling(n_layer)
+        self.lm_head.weight = self.emb.weight # [FIX] Should be after basic initialization
+
 
     def _init_weights(self, module):
+        """Linear / Embedding / Norm。"""
         if isinstance(module, nn.Linear):
             nn.init.trunc_normal_(module.weight, std=0.02)
             if module.bias is not None:
@@ -141,6 +147,38 @@ class LinearAttentionLM(nn.Module):
                 nn.init.ones_(module.weight)
             if hasattr(module, "bias") and module.bias is not None:
                 nn.init.zeros_(module.bias)
+
+    def _apply_residual_scaling(self, n_layer: int) -> None:
+        """[FIX-1] 对残差分支的输出投影按 1/√(2·N) 缩放。
+
+        依据：GPT-2 论文及 FLA 实现。若每个残差分支的输出 std≈0.02，
+        则经过 N 层叠加后残差通道的方差会增长 N 倍。
+        在输出投影处预先缩放可使叠加后方差保持 O(1)。
+
+        数学上：Var[Σ_i x_i] = N · Var[x_i]（独立同分布假设）
+        缩放后：σ_scaled = 0.02 / √(2·N)，使得：
+            Var[残差和] ≈ 2N · σ_scaled² = 2N · (0.02)²/(2N) = (0.02)²  ✓
+        （factor 2 来自每个 block 含 attention + MLP 两条残差分支）
+        """
+        std = 0.02 / math.sqrt(2 * n_layer)
+        for block in self.blocks:
+            # attention 输出投影
+            nn.init.trunc_normal_(block.attn.o_proj.weight, std=std)
+
+            # MLP 输出投影（SwiGLU 标准命名为 down_proj，也可能是 out_proj / fc2 / w2）
+            _mlp_out_candidates = ("down_proj", "out_proj", "fc2", "w2")
+            for attr_name in _mlp_out_candidates:
+                proj = getattr(block.mlp, attr_name, None)
+                if isinstance(proj, nn.Linear):
+                    nn.init.trunc_normal_(proj.weight, std=std)
+                    break
+            else:
+                # 如果上述名字都不匹配，对 MLP 内最后一个 Linear 做缩放
+                mlp_linears = [
+                    m for m in block.mlp.modules() if isinstance(m, nn.Linear)
+                ]
+                if mlp_linears:
+                    nn.init.trunc_normal_(mlp_linears[-1].weight, std=std)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         B, T = input_ids.shape

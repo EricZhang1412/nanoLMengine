@@ -43,6 +43,16 @@ class FusedChunkLinearAttentionFn(torch.autograd.Function):
 def fused_chunk_linear_attn(q, k, v):
     return FusedChunkLinearAttentionFn.apply(q, k, v)
 
+def _compute_denominator(q: torch.Tensor, k: torch.Tensor, eps: float) -> torch.Tensor:
+    # z_t = cumsum(k, dim=1): [B, S, H, D]
+    z = torch.cumsum(k, dim=1)
+    # dot product per (token, head): [B, S, H]
+    qz = (q * z).sum(dim=-1)           # [B, S, H]
+    # 下界：max(|qz|, eps)，保持符号以允许梯度流过（实际值为正）
+    denom = qz.abs().clamp(min=eps)    # [B, S, H]
+
+    return denom.unsqueeze(-1)         # [B, S, H, 1]
+
 class LinearAttention(nn.Module):
     def __init__(
         self,
@@ -55,6 +65,7 @@ class LinearAttention(nn.Module):
         norm_q: bool = False,
         norm_k: bool = False,
         norm_eps: float = 1e-5,
+        denom_eps: float = 1.0,
     ):
         super().__init__()
 
@@ -62,6 +73,7 @@ class LinearAttention(nn.Module):
         self.num_heads = num_heads
         self.key_dim = int(hidden_size * expand_k)
         self.value_dim = int(hidden_size * expand_v)
+        self.denom_eps = denom_eps
 
         assert self.key_dim % num_heads == 0, "key_dim must be divisible by num_heads"
         assert self.value_dim % num_heads == 0, "value_dim must be divisible by num_heads"
@@ -138,6 +150,10 @@ class LinearAttention(nn.Module):
             k.contiguous(),
             v.contiguous(),
         )
+
+        # ── [FIX-GRAD] Denominator 归一化 ─────────────────────
+        denom = _compute_denominator(q, k, eps=self.denom_eps)
+        o = o / denom 
 
         o = self.norm(o)
         o = rearrange(o, "b s h d -> b s (h d)")

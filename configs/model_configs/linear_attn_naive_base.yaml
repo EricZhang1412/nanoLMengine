@@ -1,17 +1,37 @@
+# configs/model/linear_attn_naive.yaml
+# ============================================================
+# 修复记录：
+#   [FIX-4] attn_norm_q / attn_norm_k 改为 true
+#           identity feature map 下 Q/K 未归一化会导致线性注意力
+#           累积状态 S_t = Σ k_i^T v_i 随序列长度无界增长，
+#           反传梯度亦随之爆炸，是初期训练不稳定的根源之一。
+# ============================================================
+
 name: linear_attn_naive
-d_model: 1024
-n_layer: 16
+
+# ── 模型结构 ─────────────────────────────────────────────────
+d_model: 512
+n_layer: 12
 n_head: 8
 dropout: 0.0
+
+# ── Attention ────────────────────────────────────────────────
 attn_expand_k: 1
 attn_expand_v: 1
 attn_feature_map: identity
+
+# [FIX-4] identity feature map 下必须开启 Q/K 归一化，
+#          否则线性注意力状态 S_t 随序列长度线性增长，
+#          导致初期 loss 剧烈震荡。
+attn_norm_q: true    # 原来: false → 改为: true
+attn_norm_k: true    # 原来: false → 改为: true
+
 attn_output_norm: rmsnorm
-attn_norm_q: false
-attn_norm_k: false
-attn_norm_eps: 1e-5
-mlp_intermediate_size: null
+attn_norm_eps: 1.0e-5
+
+# ── MLP ──────────────────────────────────────────────────────
+mlp_intermediate_size: null   # null → 4 * d_model = 2048
 mlp_reduce_output: true
 mlp_act_fun: swiglu
 mlp_norm_type: layernorm
-mlp_norm_eps: 1e-5
+mlp_norm_eps: 1.0e-5

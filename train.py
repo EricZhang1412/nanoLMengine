@@ -12,6 +12,7 @@ import torch.serialization
 from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.utilities.rank_zero import rank_zero_info
 from lightning.pytorch.strategies import FSDPStrategy
+from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, OnExceptionCheckpoint
 from aim.pytorch_lightning import AimLogger
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
@@ -24,6 +25,7 @@ from utils.count_token import TokenCountCallback
 from utils.resume import resolve_resume_ckpt, load_aim_run_hash, save_aim_run_hash
 from models.build_model import build_model
 from models.transformer.model import TransformerBlock
+from models.linear_attn.model import LinearAttentionBlock
 
 
 
@@ -115,8 +117,14 @@ def train(args):
     model_config = load_config(args.model_config)
     optimizer_config = load_config(args.optimizer_config)
 
-    exp_name = f"{model_config.name}_{tokenizer_config.name}_seqlen.{tokenizer_config.max_seq_len}_bsz.{train_config.batch_size_per_gpu}_lr.{optimizer_config.lr}_schedule.{optimizer_config.scheduler}_warmup.{optimizer_config.warmup_steps}"
-    # aim_logger = AimLogger(repo=project_config.aim_log_dir, experiment=exp_name)
+    exp_name = (
+        f"{model_config.name}_{tokenizer_config.name}"
+        f"_seqlen.{tokenizer_config.max_seq_len}"
+        f"_bsz.{train_config.batch_size_per_gpu}"
+        f"_lr.{optimizer_config.lr}"
+        f"_schedule.{optimizer_config.scheduler}"
+        f"_warmup.{optimizer_config.warmup_steps}"
+    )
 
     # seed
     if train_config.random_seed >= 0:
@@ -158,15 +166,23 @@ def train(args):
 
     trainer_strategy = train_config.trainer.strategy
     if isinstance(trainer_strategy, str) and trainer_strategy.lower() == "fsdp":
+        # [FIX-5] 根据实际模型选择 wrap class
+        _model_name = model_config.name
+        if _model_name == "linear_attn_naive":
+            _wrap_cls = {LinearAttentionBlock}
+        else:
+            _wrap_cls = {TransformerBlock}
+
         auto_wrap_policy = functools.partial(
             transformer_auto_wrap_policy,
-            transformer_layer_cls={TransformerBlock},
+            transformer_layer_cls=_wrap_cls,
         )
         trainer_strategy = FSDPStrategy(
             auto_wrap_policy=auto_wrap_policy,
-            activation_checkpointing=TransformerBlock,  # 省显存，建议开
-            use_orig_params=True,  # 对 weight tying 更友好（如你的 torch 版本支持）
+            activation_checkpointing=next(iter(_wrap_cls)),
+            use_orig_params=True,
         )
+
     
     default_root_dir = getattr(project_config, "output_dir", "./outputs")
     ckpt_dir = args.ckpt_dir or os.path.join(default_root_dir, "checkpoints", exp_name)
@@ -189,12 +205,14 @@ def train(args):
         num_nodes=int(os.environ.get("N_NODE", "1")),
         max_epochs=train_config.trainer.max_epochs,
         gradient_clip_val=train_config.trainer.gradient_clip_val,
+        gradient_clip_algorithm=train_config.trainer.gradient_clip_algorithm,
         log_every_n_steps=train_config.trainer.log_every_n_steps,
         check_val_every_n_epoch=train_config.trainer.check_val_every_n_epoch,
         val_check_interval=train_config.trainer.val_check_interval,
         enable_checkpointing=train_config.trainer.enable_checkpointing,
         accumulate_grad_batches=train_config.trainer.accumulate_grad_batches,
         limit_train_batches=train_config.limit_train_batches,
+        logger=aim_logger,
     )
     save_every_n_train_steps = int(getattr(train_config.trainer, "save_every_n_train_steps", 1000))
 
@@ -245,18 +263,22 @@ def train(args):
     max_id = max(tokenizer.trie_tokenizer.idx2token.keys())
     rank_zero_info(f"max_id in vocab: {max_id}")
 
-    trainer = Trainer(**trainer_kwargs, logger=aim_logger, callbacks=callbacks)
+    # if use multiple gpus, use tensorboard logger
+    if trainer_kwargs["devices"] > 1:
+        trainer_kwargs["logger"] = TensorBoardLogger(
+            save_dir=os.path.join(default_root_dir, "tensorboard"),
+            name=exp_name,
+        )
+    trainer = Trainer(**trainer_kwargs, callbacks=callbacks)
 
-    # save_aim_run_hash(ckpt_dir, aim_logger.experiment.hash)
     try:
-        run_hash = get_aim_run_hash(aim_logger)
+        run_hash = load_aim_run_hash(aim_logger)
         if run_hash is not None:
             save_aim_run_hash(ckpt_dir, run_hash)
         else:
             rank_zero_info("[WARN] Aim run hash unavailable, skip saving.")
     except Exception as e:
         rank_zero_info(f"[WARN] Failed to save Aim run hash: {e}")
-    # rank_zero_info(f"Aim run hash: {aim_logger.experiment.hash}")
 
     ckpt_path = resolve_resume_ckpt(args.resume, ckpt_dir)
     if ckpt_path is not None:

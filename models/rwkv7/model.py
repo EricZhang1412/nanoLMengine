@@ -585,7 +585,7 @@ class LitRWKV(L.LightningModule):
 
         if sched_name == "cosine":
             # max_steps = int(getattr(self.train_config, "max_steps", 0) or 0) if self.train_config is not None else 0
-            max_steps = self.trainer.estimated_stepping_batches
+            max_steps = int(getattr(self.train_config, "max_steps", 0))
             warmup_steps = int(getattr(self.optimizer_config, "warmup_steps", 0) or 0) if self.optimizer_config is not None else 0
             min_lr_ratio = float(getattr(self.optimizer_config, "min_lr_ratio", 0.1))
             if max_steps <= 0:
@@ -601,9 +601,11 @@ class LitRWKV(L.LightningModule):
                 return min_lr_ratio + (1 - min_lr_ratio) * cosine
 
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+            rank_zero_info("LitRWKV.configure_optimizers called: Cosine")
             return {
                 "optimizer": optimizer,
                 "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
             }
         rank_zero_info(f"Unknown scheduler={sched_name}; return optimizer only.")
+
         return optimizer

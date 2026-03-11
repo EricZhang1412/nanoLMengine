@@ -73,6 +73,7 @@ def tl_fused_chunk_bwd_kernel(
 
             # Calculate dQ
             for i in T.Pipelined(0, NT):
+                T.clear(dq)
                 T.copy(K[i_b, i * chunk_size : (i + 1) * chunk_size, i_h, i_k * BK : (i_k + 1) * BK], k)
                 T.copy(V[i_b, i * chunk_size : (i + 1) * chunk_size, i_h, i_v * BV : (i_v + 1) * BV], v)
                 T.copy(dO[i_b, i * chunk_size : (i + 1) * chunk_size, i_h, i_v * BV : (i_v + 1) * BV], do)
@@ -92,6 +93,8 @@ def tl_fused_chunk_bwd_kernel(
 
             # Calculate dK, dV (reversely)
             for i in T.Pipelined(1, NT + 1):
+                T.clear(dk)
+                T.clear(dv)
                 start = NT - i
                 for row, col in T.Parallel(chunk_size, BK):
                     q[row, col] = Q[i_b, start * chunk_size + row, i_h, i_k * BK + col] * scale
@@ -131,8 +134,8 @@ def tl_fused_chunk_bwd(Q, K, V, dO):
     dQ = torch.zeros_like(Q, dtype=torch.float32)
     dK = torch.zeros_like(K, dtype=torch.float32)
     dV = torch.zeros_like(V, dtype=torch.float32)
-    kernel(Q, K, V, dO, dQ, dK, dV)
-    return dQ.to(torch.float16), dK.to(torch.float16), dV.to(torch.float16)
+    kernel(Q, K, V, dO.to(Q.dtype), dQ, dK, dV)
+    return dQ.to(Q.dtype), dK.to(K.dtype), dV.to(V.dtype)
 
 
 def ref_program(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor]:

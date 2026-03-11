@@ -1,0 +1,5 @@
+name: fla-hub/gla-1.3B-100B
+use_fast: true
+padding_side: right
+max_seq_len: 2048
+truncation: true
