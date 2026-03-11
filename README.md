@@ -5,7 +5,8 @@ This is a customed engine repo for pretraining LMs.
 - [x] ~~Add multi-gpu training script~~
 - [x] ~~Add logging based on aimstack engine~~
 - [x] ~~Add resume training scheme~~
-- [ ] Fix the cosine scheduler issue of epoch/steps issue
+- [x] ~~Fix the cosine scheduler issue of epoch/steps issue~~
+- [ ] Fix the abnormal training in linear attention models (maybe should incorporate the flash-linear-attention implementation)
 - [ ] Add evaluation script based on lm-evaluation-harness
 
 # Usage
