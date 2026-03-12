@@ -16,6 +16,10 @@ from .transformer.model import TransformerLM
 from .rwkv7.model import RWKV7Model, LitRWKV, RWKV7Block
 from .linear_attn.model import LinearAttentionLM
 from .linear_attn.norm import RMSNorm, LayerNorm
+from .linear_attn_fla import LinearAttentionForCausalLM, LinearAttentionConfig
+from .linear_attn_fla.fused_cross_entropy import FusedCrossEntropyLoss
+from .linear_attn_fla.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
+from .linear_attn_fla.l2warp import l2_warp
 
 class L2Wrap(torch.autograd.Function):
     @staticmethod
@@ -113,6 +117,8 @@ class LitLM(L.LightningModule):
         self.tokenizer = tokenizer
         self.save_hyperparameters(ignore=["model", "tokenizer"])
 
+        self._fla_criterion = None
+
         # [NEW] skip_nan_inf related states
         self._skip_optimizer_step = False
         self._last_grad_norm = None
@@ -123,34 +129,127 @@ class LitLM(L.LightningModule):
         self.tokens_per_step = None
 
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model(input_ids)
+    def forward(self, **kwargs):
+        return self.model(**kwargs)
 
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
-        x, y = batch
-        logits = self(x)  # [B,T,V]
+    def _compute_fla_loss_and_logits(self, hidden_states, labels):
+        model = self.model  # LinearAttentionForCausalLM
+        config = model.config
 
-        loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)),
-            y.reshape(-1),
-            reduction="mean",
-        )
-        lr = self.trainer.optimizers[0].param_groups[0]["lr"]
-        self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
-        self.log("train/lr", lr, prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
+        loss, logits = None, None
+
+        if not config.fuse_linear_cross_entropy or labels is None:
+            logits = model.lm_head(hidden_states)
+
+        if labels is not None:
+            if self._fla_criterion is None:
+                if config.fuse_linear_cross_entropy:
+                    self._fla_criterion = FusedLinearCrossEntropyLoss(use_l2warp=config.use_l2warp)
+                elif config.fuse_cross_entropy:
+                    self._fla_criterion = FusedCrossEntropyLoss(inplace_backward=True)
+                else:
+                    self._fla_criterion = nn.CrossEntropyLoss()
+ 
+            criterion = self._fla_criterion
+            labels = labels.to(hidden_states.device)
+            labels = torch.cat(
+                (labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)),
+                dim=1,
+            )
+
+            if config.fuse_linear_cross_entropy:
+                loss = criterion(hidden_states, labels, model.lm_head.weight, model.lm_head.bias)
+            else:
+                loss = criterion(
+                    logits.view(labels.numel(), -1),
+                    labels.view(-1),
+                )
+                loss = l2_warp(loss, logits) if config.use_l2warp else loss
+
+        return loss, logits
+
+    # def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
+    #     x, y = batch
+    #     logits = self(x)  # [B,T,V]
+
+    #     loss = F.cross_entropy(
+    #         logits.reshape(-1, logits.size(-1)),
+    #         y.reshape(-1),
+    #         reduction="mean",
+    #     )
+    #     lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+    #     self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+    #     self.log("train/lr", lr, prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
         
-        # return loss
-        return L2Wrap.apply(loss, logits)
+    #     # return loss
+    #     return L2Wrap.apply(loss, logits)
+
+    def training_step(self, batch, batch_idx: int):
+        x, y = batch
+
+        # ----- special path for FLA causal LM -----
+        if isinstance(self.model, LinearAttentionForCausalLM):
+            outputs = self.model.model(
+                input_ids=x,
+                attention_mask=None,
+                inputs_embeds=None,
+                past_key_values=None,
+                use_cache=False,
+                output_attentions=False,
+                output_hidden_states=False,
+                return_dict=True,
+            )
+
+            hidden_states = outputs[0] if not hasattr(outputs, "last_hidden_state") else outputs.last_hidden_state
+            loss, logits = self._compute_fla_loss_and_logits(hidden_states, y)
+
+        else:
+            outputs = self(x)
+            if hasattr(outputs, "loss") and outputs.loss is not None:
+                loss = outputs.loss
+                logits = outputs.logits if hasattr(outputs, "logits") else None
+            else:
+                if isinstance(outputs, torch.Tensor):
+                    logits = outputs
+                elif hasattr(outputs, "logits") and outputs.logits is not None:
+                    logits = outputs.logits
+                elif hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
+                    if hasattr(self.model, "lm_head") and self.model.lm_head is not None:
+                        logits = self.model.lm_head(outputs.last_hidden_state)
+                    elif hasattr(self, "lm_head") and self.lm_head is not None:
+                        logits = self.lm_head(outputs.last_hidden_state)
+                    else:
+                        raise TypeError(
+                            f"Model output has last_hidden_state but no lm_head found. "
+                            f"output_type={type(outputs)}, model_type={type(self.model)}"
+                        )
+                else:
+                    raise TypeError(
+                        f"Unsupported model output type: {type(outputs)}; "
+                        f"available attrs: {dir(outputs) if outputs is not None else None}"
+                    )
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    y.reshape(-1),
+                    reduction="mean",
+                )
+        lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+        self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True,)
+        self.log("train/lr", lr, prog_bar=True, on_step=True, on_epoch=False, sync_dist=True,)
+
+        return loss
+
 
     def on_train_start(self):
         world_size = self.trainer.world_size
         micro_bsz = self.train_config.batch_size_per_gpu
         accumulate = self.trainer.accumulate_grad_batches
         seq_len = self.tokenizer_config.max_seq_len if hasattr(self.tokenizer_config, "max_seq_len") else None
-
+        print(f"self.tokenizer_config.max_seq_len={self.tokenizer_config.max_seq_len}")
         if seq_len is None:
             seq_len = getattr(self.model, "ctx_len", None)
 
+        print(f"world_size={world_size}, micro_bsz={micro_bsz}, seq_len={seq_len}, accumulate={accumulate}")
         self.tokens_per_step = (
             world_size * micro_bsz * seq_len * accumulate
         )
@@ -161,7 +260,11 @@ class LitLM(L.LightningModule):
 
     def on_before_optimizer_step(self, optimizer):
         params = [p for p in self.parameters() if p.grad is not None]
+        if self.trainer.is_global_zero and self.global_step < 10:
+            print(f"[DEBUG] params with grad: {len(params)}")
         if not params:
+            if self.trainer.is_global_zero and self.global_step < 10:
+                print("[DEBUG] no gradients at all")
             return
 
         grad_norm = torch.norm(
@@ -172,11 +275,18 @@ class LitLM(L.LightningModule):
             torch.stack([p.detach().float().norm(2) for p in params]),
             2,
         )
+        if self.trainer.is_global_zero and self.global_step < 10:
+            print(f"[DEBUG] grad_norm={grad_norm.item()}, param_norm={param_norm.item()}")
         grad_param_ratio = grad_norm / (param_norm + 1e-12)
 
         self._last_grad_norm = grad_norm
         skip_nan_inf = bool(getattr(self.train_config, "skip_nan_inf", False))
         invalid_grad = torch.isnan(grad_norm) or torch.isinf(grad_norm)
+        
+        if self.trainer.is_global_zero and self.global_step < 10:
+            print(f"[DEBUG] invalid_grad={bool(invalid_grad)} skip_nan_inf={skip_nan_inf}")
+
+        
         if skip_nan_inf and invalid_grad:
             self._skip_optimizer_step = True
             self.skipped_steps += 1
@@ -193,8 +303,11 @@ class LitLM(L.LightningModule):
 
     def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure=None):
         if self._skip_optimizer_step:
+            if optimizer_closure is not None:
+                optimizer_closure()
             optimizer.zero_grad(set_to_none=True)
             return
+
         start = self._step_start_time
         optimizer.step(closure=optimizer_closure)
 
@@ -351,6 +464,49 @@ def build_model(
             optimizer_config=optimizer_config,
             train_config=train_config,
             tokenizer=tokenizer,
+        )
+        return lit_model
+
+    elif model_config.name == "linear_attn_fla": 
+        max_seq_len = tokenizer_config.max_seq_len
+        config = LinearAttentionConfig(
+            attn_mode=model_config.attn_mode,
+            hidden_size=model_config.hidden_size,
+            expand_k=model_config.expand_k,
+            expand_v=model_config.expand_v,
+            hidden_ratio=model_config.hidden_ratio,
+            intermediate_size=model_config.intermediate_size,
+            num_hidden_layers=model_config.num_hidden_layers,
+            num_heads=model_config.num_heads,
+            num_kv_heads=model_config.num_kv_heads,
+            feature_map=model_config.feature_map,
+            tie_feature_map_qk=model_config.tie_feature_map_qk,
+            norm_q=model_config.norm_q,
+            norm_k=model_config.norm_k,
+            norm_feature_map=model_config.norm_feature_map,
+            hidden_act=model_config.hidden_act,
+            max_position_embeddings=max_seq_len,
+            elementwise_affine=model_config.elementwise_affine,
+            norm_eps=float(model_config.norm_eps),
+            fuse_norm=model_config.fuse_norm,
+            fuse_swiglu=model_config.fuse_swiglu,
+            fuse_cross_entropy=model_config.fuse_cross_entropy,
+            fuse_linear_cross_entropy=model_config.fuse_linear_cross_entropy,
+            use_l2warp=model_config.use_l2warp,
+            vocab_size=tokenizer.vocab_size,
+        )
+        model = LinearAttentionForCausalLM(
+            config=config,
+        )
+        rank_zero_info(f"Model core: {model.__class__.__name__}")
+        rank_zero_info(f"vocab_size={vocab_size}, d_model={d_model}")
+
+        lit_model = LitLM(
+            model=model,
+            optimizer_config=optimizer_config,
+            train_config=train_config,
+            tokenizer=tokenizer,
+            tokenizer_config=tokenizer_config,
         )
         return lit_model
     

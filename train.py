@@ -19,7 +19,7 @@ from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.utils.data import DataLoader
 
 from utils.load_config import load_config
-from utils.hf_dataset import load_project_dataset, HFDataset  # 你原来的函数（里面调用 load_dataset）
+from utils.hf_dataset import load_project_dataset, HFDataset
 from utils.tokenizer.base import build_tokenizer
 from utils.count_token import TokenCountCallback
 from utils.resume import resolve_resume_ckpt, load_aim_run_hash, save_aim_run_hash
