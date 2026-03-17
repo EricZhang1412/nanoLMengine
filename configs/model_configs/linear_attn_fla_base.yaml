@@ -2,18 +2,18 @@
 
 name: linear_attn_fla
 attn_mode: chunk
-hidden_size: 512
+hidden_size: 2048
 expand_k: 1.0
 expand_v: 1.0
 hidden_ratio: 4
 intermediate_size: null
-num_hidden_layers: 12
-num_heads: 8
+num_hidden_layers: 24
+num_heads: 64
 num_kv_heads: null
-feature_map: identity
+feature_map: elu
 tie_feature_map_qk: false
-norm_q: false
-norm_k: false
+norm_q: true
+norm_k: true
 norm_feature_map: false
 hidden_act: swish
 elementwise_affine: true

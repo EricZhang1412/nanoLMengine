@@ -8,7 +8,7 @@ trainer:
   check_val_every_n_epoch: 1
   val_check_interval: 1
   enable_checkpointing: true
-  accumulate_grad_batches: 10
+  accumulate_grad_batches: 62
   save_every_n_train_steps: 512
 
 random_seed: 42

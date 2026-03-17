@@ -119,6 +119,8 @@ def train(args):
 
     exp_name = (
         f"{model_config.name}_{tokenizer_config.name}"
+        f"_hidden_size.{model_config.hidden_size}"
+        f"_layers.{model_config.num_hidden_layers}"
         f"_seqlen.{tokenizer_config.max_seq_len}"
         f"_bsz.{train_config.batch_size_per_gpu}"
         f"_lr.{optimizer_config.lr}"

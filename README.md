@@ -44,8 +44,7 @@ uv run bash multigpu_train.sh # multi gpu
 ### 3. logging (based on aimstack engine)
 The training process will be logged in the `./aim_log` folder. You can use `aim up` to visualize the logging.
 ``` shell
-cd ./aim_log
-aim up
+aim up --repo=exp/aim_logs/
 ```
 Outputs are like:
 ``` shell
